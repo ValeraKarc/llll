@@ -1,5 +1,5 @@
 # Установка дополнительных библиотек (xgboost, pmdarima, holidays, reportlab, plotly)
-!pip install -q xgboost pmdarima holidays reportlab
+
 
 import pandas as pd
 import numpy as np
