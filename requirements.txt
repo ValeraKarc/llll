@@ -1,9 +1,8 @@
 streamlit
 pandas
 numpy
+plotly
 statsmodels
 scikit-learn
-xgboost
-pmdarima
-plotly
-holidays
+matplotlib
+reportlab
