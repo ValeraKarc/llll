@@ -1,15 +1,17 @@
 import streamlit as st
 import polars as pl
+import pandas as pd
 import plotly.express as px
 import io
 
-st.set_page_config(page_title="Sales Forecast Dashboard", layout="wide")
-st.title("📊 Интеллектуальная система анализа продаж")
+st.set_page_config(page_title="Sales Dashboard", layout="wide")
+st.title("📊 Анализ продаж (быстрая версия)")
 
 # =========================
-# Загрузка CSV
+# НАДЁЖНОЕ ЧТЕНИЕ CSV
 # =========================
-def read_csv_with_encodings(file_bytes, columns):
+def safe_read_csv(file_bytes, columns=None):
+
     encodings = ["utf8", "cp1251", "latin1"]
 
     for enc in encodings:
@@ -18,25 +20,26 @@ def read_csv_with_encodings(file_bytes, columns):
                 io.BytesIO(file_bytes),
                 encoding=enc,
                 columns=columns,
-                ignore_errors=True
+                ignore_errors=True,
+                truncate_ragged_lines=True,
+                infer_schema_length=0
             )
             return df
         except Exception:
             continue
 
-    raise ValueError("Не удалось прочитать файл")
+    # fallback → pandas
+    df = pd.read_csv(io.BytesIO(file_bytes), low_memory=False)
+    return pl.from_pandas(df)
 
 
 # =========================
-# Обработка
+# ОБРАБОТКА
 # =========================
 @st.cache_data(show_spinner=True)
-def process_file(file_bytes, date_col, time_col, total_col, freq):
+def process(file_bytes, date_col, time_col, total_col, freq):
 
-    df = read_csv_with_encodings(
-        file_bytes,
-        [date_col, time_col, total_col]
-    )
+    df = safe_read_csv(file_bytes, [date_col, time_col, total_col])
 
     # datetime
     df = df.with_columns(
@@ -44,37 +47,27 @@ def process_file(file_bytes, date_col, time_col, total_col, freq):
             pl.col(date_col).cast(pl.Utf8)
             + " "
             + pl.col(time_col).cast(pl.Utf8)
-        ).alias("datetime_str")
+        ).alias("dt_str")
     )
 
     df = df.with_columns(
-        pl.col("datetime_str").str.to_datetime(strict=False).alias("datetime")
-    )
+        pl.col("dt_str").str.to_datetime(strict=False).alias("datetime")
+    ).drop_nulls(["datetime"])
 
-    df = df.drop_nulls(["datetime"])
-
-    # total numeric
+    # total → число
     df = df.with_columns(
         pl.col(total_col).cast(pl.Float64, strict=False)
     )
 
     # частота
-    every_map = {
-        "D": "1d",
-        "W": "1w",
-        "M": "1mo"
-    }
-
-    every = every_map[freq]
+    freq_map = {"D": "1d", "W": "1w", "M": "1mo"}
 
     result = (
         df.group_by_dynamic(
             "datetime",
-            every=every
+            every=freq_map[freq]
         )
-        .agg(
-            pl.col(total_col).sum().alias("sales")
-        )
+        .agg(pl.col(total_col).sum().alias("sales"))
         .sort("datetime")
     )
 
@@ -84,41 +77,30 @@ def process_file(file_bytes, date_col, time_col, total_col, freq):
 # =========================
 # UI
 # =========================
-uploaded_file = st.file_uploader("Загрузите CSV", type="csv")
+file = st.file_uploader("Загрузите CSV", type="csv")
 
-if uploaded_file:
+if file:
 
-    file_bytes = uploaded_file.getvalue()
+    file_bytes = file.getvalue()
 
-    # читаем только заголовки
-    preview = pl.read_csv(
-        io.BytesIO(file_bytes),
-        n_rows=5,
-        ignore_errors=True
-    )
+    # безопасный preview
+    preview = safe_read_csv(file_bytes)
 
-    st.subheader("Первые строки")
-    st.dataframe(preview.to_pandas())
+    st.subheader("📌 Пример данных")
+    st.dataframe(preview.head(10).to_pandas())
 
     columns = preview.columns
 
-    date_col = st.selectbox("Колонка даты", columns)
-    time_col = st.selectbox("Колонка времени", columns)
-    total_col = st.selectbox("Колонка суммы", columns)
+    # выбор колонок
+    date_col = st.selectbox("Дата", columns)
+    time_col = st.selectbox("Время", columns)
+    total_col = st.selectbox("Сумма", columns)
 
-    freq = st.selectbox(
-        "Агрегация",
-        ["D", "W", "M"],
-        format_func=lambda x: {
-            "D": "День",
-            "W": "Неделя",
-            "M": "Месяц"
-        }[x]
-    )
+    freq = st.selectbox("Агрегация", ["D", "W", "M"])
 
     if st.button("🚀 Построить"):
 
-        result = process_file(
+        result = process(
             file_bytes,
             date_col,
             time_col,
@@ -126,24 +108,18 @@ if uploaded_file:
             freq
         )
 
-        st.success("Обработка завершена")
+        st.success("Готово")
 
-        st.subheader("График продаж")
+        df_plot = result.to_pandas()
 
-        fig = px.line(
-            result.to_pandas(),
-            x="datetime",
-            y="sales"
-        )
+        fig = px.line(df_plot, x="datetime", y="sales")
 
         st.plotly_chart(fig, use_container_width=True)
 
-        st.subheader("Метрики")
-
-        sales = result["sales"]
+        st.subheader("📊 Метрики")
 
         col1, col2, col3 = st.columns(3)
 
-        col1.metric("Среднее", f"{sales.mean():.2f}")
-        col2.metric("Максимум", f"{sales.max():.2f}")
-        col3.metric("Минимум", f"{sales.min():.2f}")
+        col1.metric("Среднее", f"{df_plot['sales'].mean():.2f}")
+        col2.metric("Максимум", f"{df_plot['sales'].max():.2f}")
+        col3.metric("Минимум", f"{df_plot['sales'].min():.2f}")
