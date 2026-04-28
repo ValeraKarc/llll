@@ -1,86 +1,149 @@
 import streamlit as st
-import pandas as pd
+import polars as pl
+import plotly.express as px
+import io
 
-st.set_page_config(page_title="Fast Dashboard", layout="wide")
-
-st.title("📊 Быстрая загрузка и анализ продаж")
+st.set_page_config(page_title="Sales Forecast Dashboard", layout="wide")
+st.title("📊 Интеллектуальная система анализа продаж")
 
 # =========================
-# ЗАГРУЗКА + АГРЕГАЦИЯ (СРАЗУ)
+# Загрузка CSV
+# =========================
+def read_csv_with_encodings(file_bytes, columns):
+    encodings = ["utf8", "cp1251", "latin1"]
+
+    for enc in encodings:
+        try:
+            df = pl.read_csv(
+                io.BytesIO(file_bytes),
+                encoding=enc,
+                columns=columns,
+                ignore_errors=True
+            )
+            return df
+        except Exception:
+            continue
+
+    raise ValueError("Не удалось прочитать файл")
+
+
+# =========================
+# Обработка
 # =========================
 @st.cache_data(show_spinner=True)
-def load_fast(file, date_col, time_col, total_col, freq):
+def process_file(file_bytes, date_col, time_col, total_col, freq):
 
-    result = []
+    df = read_csv_with_encodings(
+        file_bytes,
+        [date_col, time_col, total_col]
+    )
 
-    for chunk in pd.read_csv(
-        file,
-        chunksize=50000,
-        usecols=[date_col, time_col, total_col],
-        dtype={total_col: "float32"}
-    ):
+    # datetime
+    df = df.with_columns(
+        (
+            pl.col(date_col).cast(pl.Utf8)
+            + " "
+            + pl.col(time_col).cast(pl.Utf8)
+        ).alias("datetime_str")
+    )
 
-        # быстрый datetime
-        chunk["datetime"] = pd.to_datetime(
-            chunk[date_col].astype(str) + " " + chunk[time_col].astype(str),
-            errors="coerce"
+    df = df.with_columns(
+        pl.col("datetime_str").str.to_datetime(strict=False).alias("datetime")
+    )
+
+    df = df.drop_nulls(["datetime"])
+
+    # total numeric
+    df = df.with_columns(
+        pl.col(total_col).cast(pl.Float64, strict=False)
+    )
+
+    # частота
+    every_map = {
+        "D": "1d",
+        "W": "1w",
+        "M": "1mo"
+    }
+
+    every = every_map[freq]
+
+    result = (
+        df.group_by_dynamic(
+            "datetime",
+            every=every
         )
-
-        chunk = chunk.dropna(subset=["datetime"])
-
-        # агрегируем сразу
-        ts = (
-            chunk.set_index("datetime")[total_col]
-            .resample(freq)
-            .sum()
+        .agg(
+            pl.col(total_col).sum().alias("sales")
         )
+        .sort("datetime")
+    )
 
-        result.append(ts)
-
-    # объединяем куски
-    final = pd.concat(result).groupby(level=0).sum()
-
-    return final.sort_index()
+    return result
 
 
 # =========================
 # UI
 # =========================
-file = st.file_uploader("📂 Загрузите CSV", type="csv")
+uploaded_file = st.file_uploader("Загрузите CSV", type="csv")
 
-if file:
+if uploaded_file:
 
-    # читаем только заголовок (очень быстро)
-    df_head = pd.read_csv(file, nrows=5)
+    file_bytes = uploaded_file.getvalue()
 
-    st.subheader("📌 Пример данных")
-    st.dataframe(df_head)
+    # читаем только заголовки
+    preview = pl.read_csv(
+        io.BytesIO(file_bytes),
+        n_rows=5,
+        ignore_errors=True
+    )
 
-    columns = list(df_head.columns)
+    st.subheader("Первые строки")
+    st.dataframe(preview.to_pandas())
 
-    # выбор колонок
-    date_col = st.selectbox("Дата", columns)
-    time_col = st.selectbox("Время", columns)
-    total_col = st.selectbox("Сумма (total)", columns)
+    columns = preview.columns
 
-    freq = st.selectbox("Агрегация", ["D", "W", "M"])
+    date_col = st.selectbox("Колонка даты", columns)
+    time_col = st.selectbox("Колонка времени", columns)
+    total_col = st.selectbox("Колонка суммы", columns)
 
-    if st.button("🚀 Запустить обработку"):
+    freq = st.selectbox(
+        "Агрегация",
+        ["D", "W", "M"],
+        format_func=lambda x: {
+            "D": "День",
+            "W": "Неделя",
+            "M": "Месяц"
+        }[x]
+    )
 
-        # важно: сбрасываем указатель файла
-        file.seek(0)
+    if st.button("🚀 Построить"):
 
-        ts = load_fast(file, date_col, time_col, total_col, freq)
+        result = process_file(
+            file_bytes,
+            date_col,
+            time_col,
+            total_col,
+            freq
+        )
 
-        st.success("Готово")
+        st.success("Обработка завершена")
 
-        st.subheader("📈 График")
-        st.line_chart(ts)
+        st.subheader("График продаж")
 
-        st.subheader("📊 Метрики")
+        fig = px.line(
+            result.to_pandas(),
+            x="datetime",
+            y="sales"
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("Метрики")
+
+        sales = result["sales"]
 
         col1, col2, col3 = st.columns(3)
 
-        col1.metric("Среднее", f"{ts.mean():.2f}")
-        col2.metric("Максимум", f"{ts.max():.2f}")
-        col3.metric("Минимум", f"{ts.min():.2f}")
+        col1.metric("Среднее", f"{sales.mean():.2f}")
+        col2.metric("Максимум", f"{sales.max():.2f}")
+        col3.metric("Минимум", f"{sales.min():.2f}")
