@@ -1,146 +1,86 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Forecast System", layout="wide")
+st.set_page_config(page_title="Fast Dashboard", layout="wide")
 
-st.title("📊 Интеллектуальная система прогнозирования продаж")
-
-# =========================
-# 1. ЗАГРУЗКА CSV (КЕШ)
-# =========================
-@st.cache_data(show_spinner=False)
-def load_csv(file):
-
-    encodings = ["utf-8", "cp1251", "latin1"]
-
-    for enc in encodings:
-        try:
-            file.seek(0)
-            return pd.read_csv(file, encoding=enc, low_memory=False)
-        except:
-            continue
-
-    raise ValueError("Ошибка чтения файла")
-
+st.title("📊 Быстрая загрузка и анализ продаж")
 
 # =========================
-# 2. АВТО-ОПРЕДЕЛЕНИЕ КОЛОНОК
+# ЗАГРУЗКА + АГРЕГАЦИЯ (СРАЗУ)
 # =========================
-def detect_columns(df):
+@st.cache_data(show_spinner=True)
+def load_fast(file, date_col, time_col, total_col, freq):
 
-    col_map = {}
-    columns = {col.lower(): col for col in df.columns}
+    result = []
 
-    patterns = {
-        "date": ["date", "day"],
-        "time": ["time", "hour"],
-        "category": ["category", "type"],
-        "product": ["product", "item", "name"],
-        "quantity": ["quantity", "qty", "count"],
-        "price": ["price", "cost"],
-        "total": ["total", "sum", "revenue", "amount"]
-    }
+    for chunk in pd.read_csv(
+        file,
+        chunksize=50000,
+        usecols=[date_col, time_col, total_col],
+        dtype={total_col: "float32"}
+    ):
 
-    for key, variants in patterns.items():
-        for v in variants:
-            for col_lower, original in columns.items():
-                if v in col_lower:
-                    col_map[key] = original
-                    break
-            if key in col_map:
-                break
+        # быстрый datetime
+        chunk["datetime"] = pd.to_datetime(
+            chunk[date_col].astype(str) + " " + chunk[time_col].astype(str),
+            errors="coerce"
+        )
 
-    return col_map
+        chunk = chunk.dropna(subset=["datetime"])
+
+        # агрегируем сразу
+        ts = (
+            chunk.set_index("datetime")[total_col]
+            .resample(freq)
+            .sum()
+        )
+
+        result.append(ts)
+
+    # объединяем куски
+    final = pd.concat(result).groupby(level=0).sum()
+
+    return final.sort_index()
 
 
 # =========================
-# 3. UI
+# UI
 # =========================
-file = st.file_uploader("📂 Загрузите CSV файл", type="csv")
+file = st.file_uploader("📂 Загрузите CSV", type="csv")
 
 if file:
 
-    df = load_csv(file)
+    # читаем только заголовок (очень быстро)
+    df_head = pd.read_csv(file, nrows=5)
 
-    st.success("Файл загружен")
-    st.subheader("📌 Превью")
-    st.dataframe(df.head(10))
+    st.subheader("📌 Пример данных")
+    st.dataframe(df_head)
 
-    # =========================
-    # АВТО-МАППИНГ
-    # =========================
-    col_map = detect_columns(df)
+    columns = list(df_head.columns)
 
-    st.subheader("🔍 Определённые колонки")
-    st.write(col_map)
+    # выбор колонок
+    date_col = st.selectbox("Дата", columns)
+    time_col = st.selectbox("Время", columns)
+    total_col = st.selectbox("Сумма (total)", columns)
 
-    # =========================
-    # РУЧНАЯ КОРРЕКЦИЯ
-    # =========================
-    st.subheader("⚙️ Проверьте и исправьте (если нужно)")
+    freq = st.selectbox("Агрегация", ["D", "W", "M"])
 
-    def select_col(name):
-        return st.selectbox(name, ["—"] + list(df.columns),
-                            index=list(df.columns).index(col_map[name]) if name in col_map else 0)
+    if st.button("🚀 Запустить обработку"):
 
-    date_col = select_col("date")
-    time_col = select_col("time")
-    total_col = select_col("total")
+        # важно: сбрасываем указатель файла
+        file.seek(0)
 
-    # optional
-    category_col = st.selectbox("category", ["—"] + list(df.columns))
-    product_col = st.selectbox("product", ["—"] + list(df.columns))
+        ts = load_fast(file, date_col, time_col, total_col, freq)
 
-    # =========================
-    # ВАЛИДАЦИЯ
-    # =========================
-    if "—" in [date_col, time_col, total_col]:
-        st.warning("Выберите обязательные поля")
-        st.stop()
+        st.success("Готово")
 
-    # =========================
-    # ОБРАБОТКА
-    # =========================
-    df["datetime"] = pd.to_datetime(
-        df[date_col].astype(str) + " " + df[time_col].astype(str),
-        errors="coerce"
-    )
+        st.subheader("📈 График")
+        st.line_chart(ts)
 
-    df = df.dropna(subset=["datetime"])
+        st.subheader("📊 Метрики")
 
-    # фильтр категории
-    if category_col != "—":
-        categories = ["All"] + list(df[category_col].unique())
-        selected_cat = st.selectbox("Фильтр категории", categories)
+        col1, col2, col3 = st.columns(3)
 
-        if selected_cat != "All":
-            df = df[df[category_col] == selected_cat]
-
-    # =========================
-    # АГРЕГАЦИЯ
-    # =========================
-    freq = st.selectbox("Период агрегации", ["D", "W", "M"])
-
-    ts = (
-        df.set_index("datetime")[total_col]
-        .resample(freq)
-        .sum()
-        .fillna(0)
-    )
-
-    # =========================
-    # ВИЗУАЛИЗАЦИЯ
-    # =========================
-    st.subheader("📈 Продажи")
-    st.line_chart(ts)
-
-    # =========================
-    # МЕТРИКИ
-    # =========================
-    st.subheader("📊 Метрики")
-
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric("Среднее", f"{ts.mean():.2f}")
-    col2.metric("Максимум", f"{ts.max():.2f}")
-    col3.metric("Минимум", f"{ts.min():.2f}")
+        col1.metric("Среднее", f"{ts.mean():.2f}")
+        col2.metric("Максимум", f"{ts.max():.2f}")
+        col3.metric("Минимум", f"{ts.min():.2f}")
