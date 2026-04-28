@@ -1,8 +1,4 @@
 streamlit
-pandas
-numpy
+polars
 plotly
-statsmodels
-scikit-learn
-matplotlib
-reportlab
+pyarrow
