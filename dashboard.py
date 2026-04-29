@@ -1,118 +1,144 @@
 import streamlit as st
 import polars as pl
 import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
+import statsmodels.api as sm
 import io
 
-st.set_page_config(page_title="Sales Dashboard", layout="wide")
-st.title("📊 Анализ продаж (быстрая версия)")
+st.set_page_config(page_title="Sales Forecast", layout="wide")
+st.title("📊 Прогнозирование продаж")
 
 # =========================
-# НАДЁЖНОЕ ЧТЕНИЕ CSV
+# ЧТЕНИЕ CSV (устойчивое)
 # =========================
-def safe_read_csv(file_bytes, columns=None):
-
+def safe_read(file_bytes, columns=None):
     encodings = ["utf8", "cp1251", "latin1"]
 
     for enc in encodings:
         try:
-            df = pl.read_csv(
+            return pl.read_csv(
                 io.BytesIO(file_bytes),
                 encoding=enc,
                 columns=columns,
                 ignore_errors=True,
-                truncate_ragged_lines=True,
-                infer_schema_length=0
+                truncate_ragged_lines=True
             )
-            return df
-        except Exception:
+        except:
             continue
 
-    # fallback → pandas
-    df = pd.read_csv(io.BytesIO(file_bytes), low_memory=False)
+    df = pd.read_csv(io.BytesIO(file_bytes))
     return pl.from_pandas(df)
 
 
 # =========================
-# ОБРАБОТКА
+# ОБРАБОТКА + TS
 # =========================
 @st.cache_data(show_spinner=True)
-def process(file_bytes, date_col, time_col, total_col, freq):
+def prepare_ts(file_bytes, date_col, time_col, total_col, freq):
 
-    df = safe_read_csv(file_bytes, [date_col, time_col, total_col])
+    df = safe_read(file_bytes, [date_col, time_col, total_col])
 
-    # datetime
-    df = df.with_columns(
-        (
-            pl.col(date_col).cast(pl.Utf8)
-            + " "
-            + pl.col(time_col).cast(pl.Utf8)
-        ).alias("dt_str")
+    # 👉 datetime через pandas (самый стабильный способ)
+    pdf = df.to_pandas()
+
+    pdf["datetime"] = pd.to_datetime(
+        pdf[date_col].astype(str) + " " + pdf[time_col].astype(str),
+        errors="coerce"
     )
 
-    df = df.with_columns(
-        pl.col("dt_str").str.to_datetime(strict=False).alias("datetime")
-    ).drop_nulls(["datetime"])
+    pdf = pdf.dropna(subset=["datetime"])
 
-    # total → число
-    df = df.with_columns(
-        pl.col(total_col).cast(pl.Float64, strict=False)
+    pdf[total_col] = pd.to_numeric(pdf[total_col], errors="coerce").fillna(0)
+
+    ts = (
+        pdf.set_index("datetime")[total_col]
+        .resample(freq)
+        .sum()
     )
 
-    # частота
-    freq_map = {"D": "1d", "W": "1w", "M": "1mo"}
+    return ts
 
-    result = (
-        df.group_by_dynamic(
-            "datetime",
-            every=freq_map[freq]
-        )
-        .agg(pl.col(total_col).sum().alias("sales"))
-        .sort("datetime")
+
+# =========================
+# ПРОГНОЗ (SARIMA)
+# =========================
+def forecast_sarima(ts, steps):
+
+    model = sm.tsa.SARIMAX(
+        ts,
+        order=(1, 1, 1),
+        seasonal_order=(1, 1, 1, 7)
     )
 
-    return result
+    res = model.fit(disp=False)
+
+    forecast = res.get_forecast(steps=steps)
+
+    pred = forecast.predicted_mean
+    conf = forecast.conf_int()
+
+    return pred, conf
 
 
 # =========================
 # UI
 # =========================
-file = st.file_uploader("Загрузите CSV", type="csv")
+file = st.file_uploader("📂 Загрузите CSV", type="csv")
 
 if file:
 
     file_bytes = file.getvalue()
 
-    # безопасный preview
-    preview = safe_read_csv(file_bytes)
+    preview = safe_read(file_bytes)
 
-    st.subheader("📌 Пример данных")
+    st.subheader("📌 Данные")
     st.dataframe(preview.head(10).to_pandas())
 
     columns = preview.columns
 
-    # выбор колонок
     date_col = st.selectbox("Дата", columns)
     time_col = st.selectbox("Время", columns)
     total_col = st.selectbox("Сумма", columns)
 
     freq = st.selectbox("Агрегация", ["D", "W", "M"])
+    horizon = st.slider("Горизонт прогноза", 7, 60, 14)
 
-    if st.button("🚀 Построить"):
+    if st.button("🚀 Построить прогноз"):
 
-        result = process(
-            file_bytes,
-            date_col,
-            time_col,
-            total_col,
-            freq
-        )
+        ts = prepare_ts(file_bytes, date_col, time_col, total_col, freq)
 
-        st.success("Готово")
+        pred, conf = forecast_sarima(ts, horizon)
 
-        df_plot = result.to_pandas()
+        # =========================
+        # ГРАФИК
+        # =========================
+        fig = go.Figure()
 
-        fig = px.line(df_plot, x="datetime", y="sales")
+        fig.add_trace(go.Scatter(
+            x=ts.index,
+            y=ts,
+            name="История"
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=pred.index,
+            y=pred,
+            name="Прогноз"
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=conf.index,
+            y=conf.iloc[:, 0],
+            name="Нижняя граница",
+            line=dict(dash="dot")
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=conf.index,
+            y=conf.iloc[:, 1],
+            name="Верхняя граница",
+            line=dict(dash="dot")
+        ))
 
         st.plotly_chart(fig, use_container_width=True)
 
@@ -120,6 +146,6 @@ if file:
 
         col1, col2, col3 = st.columns(3)
 
-        col1.metric("Среднее", f"{df_plot['sales'].mean():.2f}")
-        col2.metric("Максимум", f"{df_plot['sales'].max():.2f}")
-        col3.metric("Минимум", f"{df_plot['sales'].min():.2f}")
+        col1.metric("Среднее", f"{ts.mean():.2f}")
+        col2.metric("Максимум", f"{ts.max():.2f}")
+        col3.metric("Минимум", f"{ts.min():.2f}")
