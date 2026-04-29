@@ -7,7 +7,7 @@ import numpy as np
 import io
 
 st.set_page_config(page_title="Sales Forecast", layout="wide")
-st.title("📊 Интеллектуальная система прогнозирования продаж")
+st.title("📊 Прогнозирование продаж")
 
 # =========================
 # ЧТЕНИЕ CSV
@@ -33,34 +33,33 @@ def safe_read(file_bytes, columns=None):
 
 
 # =========================
-# ПОДГОТОВКА ДАННЫХ (УЛУЧШЕННАЯ)
+# ПОДГОТОВКА ДАННЫХ
 # =========================
 @st.cache_data(show_spinner=True)
-def prepare_ts(file_bytes, date_col, time_col, total_col, freq):
+def prepare_ts(file_bytes, date_col, time_col, total_col, category_col, selected_category, freq):
 
-    df = safe_read(file_bytes, [date_col, time_col, total_col])
+    df = safe_read(file_bytes)
 
     pdf = df.to_pandas()
 
     # -------------------------
-    # 1. Очистка строк
+    # datetime (устойчивый)
     # -------------------------
-    pdf[date_col] = pdf[date_col].astype(str).str.strip()
-    pdf[time_col] = pdf[time_col].astype(str).str.strip()
+    if pd.api.types.is_numeric_dtype(pdf[date_col]):
+        pdf["datetime"] = pd.to_datetime(pdf[date_col], unit="D", origin="1899-12-30")
+    else:
+        date_series = pdf[date_col].astype(str).fillna("").str.strip()
+        time_series = pdf[time_col].astype(str).fillna("").str.strip()
 
-    # -------------------------
-    # 2. datetime
-    # -------------------------
-    pdf["datetime"] = pd.to_datetime(
-        pdf[date_col] + " " + pdf[time_col],
-        errors="coerce",
-        infer_datetime_format=True
-    )
+        pdf["datetime"] = pd.to_datetime(
+            date_series + " " + time_series,
+            errors="coerce"
+        )
 
     pdf = pdf.dropna(subset=["datetime"])
 
     # -------------------------
-    # 3. Числа
+    # total
     # -------------------------
     pdf[total_col] = (
         pdf[total_col]
@@ -69,46 +68,35 @@ def prepare_ts(file_bytes, date_col, time_col, total_col, freq):
     )
 
     pdf[total_col] = pd.to_numeric(pdf[total_col], errors="coerce")
-
-    # -------------------------
-    # 4. Удаление мусора
-    # -------------------------
     pdf = pdf.dropna(subset=[total_col])
-    pdf = pdf[pdf[total_col] >= 0]
 
     # -------------------------
-    # 5. Удаление дубликатов
+    # фильтр категории
     # -------------------------
-    pdf = pdf.drop_duplicates(subset=["datetime"])
+    if category_col != "—" and selected_category != "All":
+        pdf = pdf[pdf[category_col] == selected_category]
 
     # -------------------------
-    # 6. Агрегация
+    # агрегация
     # -------------------------
     ts = (
         pdf.set_index("datetime")[total_col]
         .resample(freq)
         .sum()
+        .fillna(0)
     )
 
     # -------------------------
-    # 7. Заполнение пропусков
-    # -------------------------
-    ts = ts.fillna(0)
-
-    # -------------------------
-    # 8. Удаление выбросов (IQR)
+    # удаление выбросов
     # -------------------------
     q1 = ts.quantile(0.25)
     q3 = ts.quantile(0.75)
     iqr = q3 - q1
 
-    lower = q1 - 1.5 * iqr
-    upper = q3 + 1.5 * iqr
-
-    ts = ts.clip(lower=lower, upper=upper)
+    ts = ts.clip(lower=q1 - 1.5 * iqr, upper=q3 + 1.5 * iqr)
 
     # -------------------------
-    # 9. Логарифмирование
+    # логарифм
     # -------------------------
     ts_log = np.log1p(ts)
 
@@ -118,24 +106,20 @@ def prepare_ts(file_bytes, date_col, time_col, total_col, freq):
 # =========================
 # ПРОГНОЗ
 # =========================
-def forecast_sarima(ts_log, steps, seasonal_period):
+def forecast(ts_log, steps, seasonal):
 
     model = sm.tsa.SARIMAX(
         ts_log,
-        order=(1, 1, 1),
-        seasonal_order=(1, 1, 1, seasonal_period)
+        order=(1,1,1),
+        seasonal_order=(1,1,1,seasonal)
     )
 
     res = model.fit(disp=False)
 
-    forecast = res.get_forecast(steps=steps)
+    f = res.get_forecast(steps=steps)
 
-    pred_log = forecast.predicted_mean
-    conf_log = forecast.conf_int()
-
-    # обратно из логарифма
-    pred = np.expm1(pred_log)
-    conf = np.expm1(conf_log)
+    pred = np.expm1(f.predicted_mean)
+    conf = np.expm1(f.conf_int())
 
     return pred, conf
 
@@ -143,7 +127,7 @@ def forecast_sarima(ts_log, steps, seasonal_period):
 # =========================
 # ОЦЕНКА
 # =========================
-def evaluate_model(ts_log, seasonal_period):
+def evaluate(ts_log, seasonal):
 
     split = int(len(ts_log) * 0.8)
 
@@ -152,22 +136,18 @@ def evaluate_model(ts_log, seasonal_period):
 
     model = sm.tsa.SARIMAX(
         train,
-        order=(1, 1, 1),
-        seasonal_order=(1, 1, 1, seasonal_period)
+        order=(1,1,1),
+        seasonal_order=(1,1,1,seasonal)
     )
 
     res = model.fit(disp=False)
 
-    pred_log = res.forecast(steps=len(test))
+    pred_log = res.forecast(len(test))
 
-    # обратно
     pred = np.expm1(pred_log)
     test_real = np.expm1(test)
 
-    # MAPE
     mape = np.mean(np.abs((test_real - pred) / test_real.replace(0, np.nan))) * 100
-
-    # RMSE
     rmse = np.sqrt(np.mean((test_real - pred) ** 2))
 
     return mape, rmse, pred, test_real
@@ -187,49 +167,54 @@ if file:
     st.subheader("📌 Предпросмотр")
     st.dataframe(preview.head(10).to_pandas())
 
-    columns = preview.columns
+    cols = preview.columns
 
-    date_col = st.selectbox("Дата", columns)
-    time_col = st.selectbox("Время", columns)
-    total_col = st.selectbox("Сумма", columns)
+    date_col = st.selectbox("Дата", cols)
+    time_col = st.selectbox("Время", cols)
+    total_col = st.selectbox("Сумма", cols)
 
-    freq = st.selectbox(
-        "Агрегация",
-        ["D", "W", "M"],
-        format_func=lambda x: {
-            "D": "День",
-            "W": "Неделя",
-            "M": "Месяц"
-        }[x]
-    )
+    category_col = st.selectbox("Категория (опционально)", ["—"] + list(cols))
+
+    selected_category = "All"
+    if category_col != "—":
+        categories = ["All"] + list(preview[category_col].drop_nulls().unique())
+        selected_category = st.selectbox("Выбор категории", categories)
+
+    freq = st.selectbox("Агрегация", ["D", "W", "M"])
 
     horizon = st.slider("Горизонт прогноза", 7, 60, 14)
 
-    if st.button("🚀 Построить"):
+    if st.button("🚀 Построить прогноз"):
 
-        ts, ts_log = prepare_ts(file_bytes, date_col, time_col, total_col, freq)
+        ts, ts_log = prepare_ts(
+            file_bytes,
+            date_col,
+            time_col,
+            total_col,
+            category_col,
+            selected_category,
+            freq
+        )
 
-        # сезонность
         seasonal_map = {"D": 7, "W": 52, "M": 12}
-        seasonal_period = seasonal_map[freq]
+        seasonal = seasonal_map[freq]
 
-        # оценка
-        mape, rmse, pred_test, test = evaluate_model(ts_log, seasonal_period)
+        mape, rmse, pred_test, test = evaluate(ts_log, seasonal)
 
-        st.subheader("📊 Качество модели")
+        st.subheader("📊 Качество")
 
         c1, c2 = st.columns(2)
         c1.metric("MAPE (%)", f"{mape:.2f}")
         c2.metric("RMSE", f"{rmse:.2f}")
 
-        # график теста
+        # тест график
         fig_test = go.Figure()
         fig_test.add_trace(go.Scatter(x=test.index, y=test, name="Факт"))
         fig_test.add_trace(go.Scatter(x=pred_test.index, y=pred_test, name="Прогноз"))
         st.plotly_chart(fig_test, use_container_width=True)
 
         # финальный прогноз
-        pred, conf = forecast_sarima(ts_log, horizon, seasonal_period)
+        pred, conf = forecast(ts_log, horizon, seasonal)
 
         st.subheader("📈 Прогноз")
 
@@ -237,26 +222,7 @@ if file:
         fig.add_trace(go.Scatter(x=ts.index, y=ts, name="История"))
         fig.add_trace(go.Scatter(x=pred.index, y=pred, name="Прогноз"))
 
-        fig.add_trace(go.Scatter(
-            x=conf.index,
-            y=conf.iloc[:, 0],
-            name="Нижняя граница",
-            line=dict(dash="dot")
-        ))
-
-        fig.add_trace(go.Scatter(
-            x=conf.index,
-            y=conf.iloc[:, 1],
-            name="Верхняя граница",
-            line=dict(dash="dot")
-        ))
+        fig.add_trace(go.Scatter(x=conf.index, y=conf.iloc[:,0], name="Нижняя", line=dict(dash="dot")))
+        fig.add_trace(go.Scatter(x=conf.index, y=conf.iloc[:,1], name="Верхняя", line=dict(dash="dot")))
 
         st.plotly_chart(fig, use_container_width=True)
-
-        # метрики
-        st.subheader("📊 Общие показатели")
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Среднее", f"{ts.mean():.2f}")
-        c2.metric("Максимум", f"{ts.max():.2f}")
-        c3.metric("Минимум", f"{ts.min():.2f}")
