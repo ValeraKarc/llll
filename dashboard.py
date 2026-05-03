@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from io import BytesIO
 import base64
-import traceback
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -45,28 +44,25 @@ def mean_absolute_percentage_error(y_true, y_pred):
     return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask]))
 
 def create_lag_features(series, lags, freq_str):
-    """Создаёт признаки для ML-моделей на основе одного временного ряда."""
     df_feat = pd.DataFrame(index=series.index)
     for lag in range(1, lags + 1):
         df_feat[f'lag_{lag}'] = series.shift(lag)
     df_feat['rolling_mean_3'] = series.rolling(window=3).mean()
-    
-    # Добавляем временные признаки в зависимости от частоты
-    if 'h' in freq_str.lower():  # часовые данные
+
+    if 'h' in freq_str.lower():
         df_feat['hour'] = series.index.hour
         df_feat['dayofweek'] = series.index.dayofweek
-    elif 'd' in freq_str.lower():  # дневные данные
+    elif 'd' in freq_str.lower():
         df_feat['dayofweek'] = series.index.dayofweek
-    elif 'w' in freq_str.lower():  # недельные данные
+    elif 'w' in freq_str.lower():
         df_feat['weekofyear'] = series.index.isocalendar().week.astype(int)
-    elif 'm' in freq_str.lower():  # месячные данные
+    elif 'm' in freq_str.lower():
         df_feat['month'] = series.index.month
-    
+
     df_feat = df_feat.dropna()
     return df_feat, series[df_feat.index]
 
 def recursive_forecast(model, initial_series, forecast_dates, lags, freq_str):
-    """Рекурсивный прогноз ML-модели на заданные даты."""
     history = initial_series.copy()
     preds = []
     for dt in forecast_dates:
@@ -78,8 +74,7 @@ def recursive_forecast(model, initial_series, forecast_dates, lags, freq_str):
             features['rolling_mean_3'] = last_vals.iloc[-3:].mean()
         else:
             features['rolling_mean_3'] = np.mean(last_vals)
-        
-        # Добавляем временные признаки
+
         if 'h' in freq_str.lower():
             features['hour'] = dt.hour
             features['dayofweek'] = dt.dayofweek
@@ -89,7 +84,7 @@ def recursive_forecast(model, initial_series, forecast_dates, lags, freq_str):
             features['weekofyear'] = dt.isocalendar().week
         elif 'm' in freq_str.lower():
             features['month'] = dt.month
-            
+
         X = pd.DataFrame([features])
         pred = model.predict(X)[0]
         preds.append(pred)
@@ -97,7 +92,6 @@ def recursive_forecast(model, initial_series, forecast_dates, lags, freq_str):
     return np.array(preds)
 
 def train_and_evaluate_ml(model, train_series, test_index, lags, freq_str):
-    """Обучение ML модели и рекурсивный прогноз на тестовый период."""
     X_train_full, y_train_full = create_lag_features(train_series, lags, freq_str)
     if len(X_train_full) == 0:
         return None, None
@@ -114,6 +108,7 @@ encoding_options = ['auto', 'utf-8', 'cp1251', 'latin1', 'iso-8859-1', 'cp1252']
 encoding_choice = st.selectbox("Кодировка CSV-файла", encoding_options, index=0)
 
 uploaded_file = st.file_uploader("Загрузите CSV-файл с данными", type=["csv"])
+
 if uploaded_file is not None:
     # Определяем кодировку
     if encoding_choice == 'auto':
@@ -200,14 +195,13 @@ if uploaded_file is not None:
         st.error(f"Ошибка обработки данных: {e}")
         st.stop()
 
-        # ===================== Блок создания прогноза =====================
-    # Настройки прогноза (теперь внутри блока, чтобы состояние сохранялось)
+    # ===================== Блок создания прогноза =====================
     freq_map = {'час': 'h', 'день': 'D', 'неделя': 'W-MON', 'месяц': 'MS'}
     freq_label = st.selectbox("Периодичность агрегации", list(freq_map.keys()))
     freq = freq_map[freq_label]
     horizon = st.number_input("Горизонт прогноза (количество периодов)", min_value=1, max_value=100, value=10, step=1)
 
-    # Кнопка запуска всего прогнозирования
+    # Кнопка запуска прогнозирования
     if st.button("🚀 Создать прогноз"):
         # Агрегация временного ряда
         ts = df.set_index('datetime').resample(freq)['total'].sum().dropna()
@@ -220,7 +214,7 @@ if uploaded_file is not None:
         st.write(f"Тренировочный период: {train.index.min()} – {train.index.max()} ({len(train)} отсчетов)")
         st.write(f"Тестовый период: {test.index.min()} – {test.index.max()} ({len(test)} отсчетов)")
 
-        # Параметры сезонности и лагов
+        # Параметры сезонности
         if freq == 'h':
             seasonal_periods = 24
         elif freq == 'D':
@@ -307,9 +301,9 @@ if uploaded_file is not None:
         st.write(f"RMSE на тесте: {best['rmse']:.2f}")
         st.write(f"MAPE на тесте: {best['mape']:.2f}%")
 
-        # Финальный прогноз на полной выборке
+        # Финальный прогноз на всех данных
         full_ts = pd.concat([train, test])
-        # Определяем единицу для приращения при построении future_dates
+        # Определяем правильную единицу для шага при создании будущих дат
         if freq == 'h':
             time_unit = 'h'
         elif freq == 'D':
@@ -317,9 +311,12 @@ if uploaded_file is not None:
         elif freq == 'W-MON':
             time_unit = 'W'
         else:
-            time_unit = 'MS'
-        future_dates = pd.date_range(start=full_ts.index[-1] + pd.Timedelta(1, unit=time_unit if time_unit != 'MS' else 'D'),
-                                     periods=horizon, freq=freq)
+            time_unit = 'MS'  # 'MS' работает в pd.date_range
+        future_dates = pd.date_range(
+            start=full_ts.index[-1] + pd.Timedelta(1, unit='D' if time_unit == 'MS' else time_unit),
+            periods=horizon,
+            freq=freq
+        )
 
         if best_name == 'Holt-Winters':
             model_full = ExponentialSmoothing(full_ts, trend='add', seasonal='add',
@@ -367,10 +364,10 @@ if uploaded_file is not None:
         fig.add_vline(x=split_date, line_dash="dash", line_color="red", annotation_text="Начало прогноза")
         fig.update_layout(title=f"Прогноз по модели {best_name}",
                           xaxis_title="Дата", yaxis_title="Total")
-        # Включаем колесо мыши для масштабирования и другие элементы управления
+        # Включаем колесо мыши для масштабирования и панель инструментов
         st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'displayModeBar': True})
 
-        # Кнопка генерации PDF отчёта (появляется после прогноза)
+        # PDF-отчёт (кнопка появляется после прогноза)
         if st.button("📄 Скачать PDF-отчёт"):
             pdf = FPDF()
             pdf.add_page()
@@ -401,7 +398,6 @@ if uploaded_file is not None:
                 pdf.cell(40, 8, f"{pi_upper[i]:.2f}", 1)
                 pdf.ln()
 
-            # График для PDF
             fig_mpl, ax = plt.subplots(figsize=(8, 4))
             ax.plot(train.index, train.values, label='Train', color='blue')
             ax.plot(test.index, test.values, label='Test', color='orange')
