@@ -37,8 +37,9 @@ import matplotlib
 matplotlib.use('Agg')
 
 # ============================== Вспомогательные функции ==============================
+# ... (те же вспомогательные функции, что и в предыдущей версии: MAPE, create_lag_features, recursive_forecast, train_and_evaluate_ml)
+
 def mean_absolute_percentage_error(y_true, y_pred):
-    """MAPE с защитой от нулей."""
     y_true, y_pred = np.array(y_true), np.array(y_pred)
     mask = y_true != 0
     if np.sum(mask) == 0:
@@ -46,7 +47,6 @@ def mean_absolute_percentage_error(y_true, y_pred):
     return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask]))
 
 def create_lag_features(series, lags, freq_str):
-    """Создание признаков для ML-моделей на основе одного временного ряда."""
     df_feat = pd.DataFrame(index=series.index)
     for lag in range(1, lags + 1):
         df_feat[f'lag_{lag}'] = series.shift(lag)
@@ -60,25 +60,17 @@ def create_lag_features(series, lags, freq_str):
     return df_feat, series[df_feat.index]
 
 def recursive_forecast(model, initial_series, forecast_dates, lags, freq_str):
-    """
-    Рекурсивный прогноз ML-модели на заданные даты.
-    initial_series: pd.Series с историческими данными (весь доступный ряд).
-    Возвращает массив прогнозов длины len(forecast_dates).
-    """
     history = initial_series.copy()
     preds = []
     for dt in forecast_dates:
-        # Строим признаки из последних lags значений
         last_vals = history.iloc[-lags:]
         features = {}
         for i in range(1, lags + 1):
             features[f'lag_{i}'] = last_vals.iloc[-i] if len(last_vals) >= i else np.nan
-        # Скользящее среднее
         if len(last_vals) >= 3:
             features['rolling_mean_3'] = last_vals.iloc[-3:].mean()
         else:
             features['rolling_mean_3'] = np.mean(last_vals)
-        # Временные характеристики
         if freq_str in ['H', 'D', 'W']:
             features['hour'] = dt.hour
             features['dayofweek'] = dt.dayofweek
@@ -87,12 +79,10 @@ def recursive_forecast(model, initial_series, forecast_dates, lags, freq_str):
         X = pd.DataFrame([features])
         pred = model.predict(X)[0]
         preds.append(pred)
-        # Добавляем новую точку в историю
         history = pd.concat([history, pd.Series({dt: pred})])
     return np.array(preds)
 
 def train_and_evaluate_ml(model, train_series, test_index, lags, freq_str):
-    """Обучение ML модели на train_series и оценка рекурсивным прогнозом на test_index."""
     X_train_full, y_train_full = create_lag_features(train_series, lags, freq_str)
     if len(X_train_full) == 0:
         return None, None
@@ -115,10 +105,59 @@ if uploaded_file is not None:
         st.error(f"❌ Отсутствуют обязательные столбцы: {', '.join(missing)}")
         st.stop()
 
-    # Очистка данных
+    # --------------------------------------------------------------
+    # Гибкий парсинг даты и времени
+    # --------------------------------------------------------------
+    # Попробуем автоматически распознать форматы
+    date_series = df['date'].astype(str)
+    time_series = df['time'].astype(str)
+
+    # Если time пустой или содержит только точки/пробелы, считаем что дата уже содержит время
+    time_is_empty = time_series.str.replace(r'[\s\.]', '', regex=True).str.len().sum() == 0
+
+    if not time_is_empty:
+        # Пробуем объединить строки и парсить
+        datetime_str = date_series + ' ' + time_series
+        df['datetime'] = pd.to_datetime(datetime_str, errors='coerce')
+    else:
+        # Только дата
+        df['datetime'] = pd.to_datetime(date_series, errors='coerce')
+
+    # Считаем долю успешных парсингов
+    success_rate = df['datetime'].notna().mean()
+    if success_rate < 0.9:
+        st.warning(f"Автоматически удалось распарсить только {success_rate:.1%} дат/времени. Укажите форматы вручную.")
+        with st.expander("⚙️ Ручная настройка форматов", expanded=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                date_fmt = st.text_input("Формат даты (Python strftime)", value="%Y-%m-%d",
+                                         help="Например: %d.%m.%Y, %m/%d/%Y, %Y-%m-%d")
+            if not time_is_empty:
+                with col2:
+                    time_fmt = st.text_input("Формат времени", value="%H:%M:%S",
+                                             help="Например: %H:%M, %I:%M %p, %H:%M:%S")
+
+            if st.button("Применить форматы"):
+                # Парсим с указанными форматами
+                parsed_dates = pd.to_datetime(date_series, format=date_fmt, errors='coerce')
+                if not time_is_empty:
+                    parsed_times = pd.to_datetime(time_series, format=time_fmt, errors='coerce').dt.time
+                    df['datetime'] = pd.to_datetime(
+                        parsed_dates.dt.strftime('%Y-%m-%d') + ' ' + parsed_times.astype(str),
+                        errors='coerce'
+                    )
+                else:
+                    df['datetime'] = parsed_dates
+
+                success_rate = df['datetime'].notna().mean()
+                st.info(f"Новый процент распарсенных: {success_rate:.1%}")
+        if df['datetime'].notna().sum() == 0:
+            st.error("Не удалось распарсить даты даже после ручной настройки. Проверьте данные.")
+            st.stop()
+    # --------------------------------------------------------------
+
+    # Очистка остальных данных
     try:
-        df['datetime'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str),
-                                        errors='coerce')
         df.dropna(subset=['datetime'], inplace=True)
         for col in ['quantity', 'price', 'total']:
             df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -132,28 +171,28 @@ if uploaded_file is not None:
         st.error(f"Ошибка обработки данных: {e}")
         st.stop()
 
-    # ----- Настройки прогноза -----
+    # ----- Настройки прогноза (дальше без изменений) -----
     freq_map = {'час': 'H', 'день': 'D', 'неделя': 'W', 'месяц': 'M'}
     freq_label = st.selectbox("Периодичность агрегации", list(freq_map.keys()))
     freq = freq_map[freq_label]
 
-    # Горизонт прогноза (в периодах агрегации)
     horizon = st.number_input("Горизонт прогноза (количество периодов)", min_value=1, max_value=100, value=10, step=1)
 
-    # Агрегация временного ряда (сумма total)
     ts = df.set_index('datetime').resample(freq)['total'].sum().dropna()
     if len(ts) < horizon + 5:
         st.error(f"Недостаточно данных. Длина ряда {len(ts)} точек, а нужно минимум {horizon + 5}.")
         st.stop()
 
-    # Train/Test split (последние horizon отсчетов = тест)
     train = ts.iloc[:-horizon]
     test = ts.iloc[-horizon:]
 
     st.write(f"Тренировочный период: {train.index.min()} – {train.index.max()} ({len(train)} отсчетов)")
     st.write(f"Тестовый период: {test.index.min()} – {test.index.max()} ({len(test)} отсчетов)")
 
-    # Параметры сезонности для моделей
+    # ... (оставшаяся часть кода без изменений: обучение моделей, сравнение, прогноз, график, PDF)
+    # Полный код идентичен предыдущей версии, добавлю сюда для полноты.
+
+    # Параметры сезонности
     if freq == 'H':
         seasonal_periods = 24
     elif freq == 'D':
@@ -162,23 +201,16 @@ if uploaded_file is not None:
         seasonal_periods = 52
     else:  # M
         seasonal_periods = 12
-
-    # Корректировка, если ряд слишком короткий
     if seasonal_periods >= len(train):
         seasonal_periods = max(2, len(train) // 2)
-
-    # Число лагов для ML
     lags = min(5, len(train) // 2)
 
-    # ============================== Обучение и сравнение моделей ======================
-    results = {}  # ключ: название модели, значение: dict с pred_test, rmse, mape, best_model (fitted)
+    results = {}
 
     # 1. Holt-Winters
     try:
-        model_hw = ExponentialSmoothing(
-            train, trend='add', seasonal='add',
-            seasonal_periods=seasonal_periods, initialization_method='estimated'
-        )
+        model_hw = ExponentialSmoothing(train, trend='add', seasonal='add',
+                                        seasonal_periods=seasonal_periods, initialization_method='estimated')
         fitted_hw = model_hw.fit()
         pred_hw = fitted_hw.forecast(horizon)
         rmse = np.sqrt(mean_squared_error(test, pred_hw))
@@ -190,11 +222,9 @@ if uploaded_file is not None:
     # 2. ARIMA (SARIMA) через pmdarima
     if HAS_PMDARIMA:
         try:
-            arima_model = pm.auto_arima(
-                train, seasonal=True, m=seasonal_periods,
-                suppress_warnings=True, error_action='ignore',
-                stepwise=True, trace=False
-            )
+            arima_model = pm.auto_arima(train, seasonal=True, m=seasonal_periods,
+                                        suppress_warnings=True, error_action='ignore',
+                                        stepwise=True, trace=False)
             pred_arima = arima_model.predict(n_periods=horizon)
             rmse = np.sqrt(mean_squared_error(test, pred_arima))
             mape = mean_absolute_percentage_error(test, pred_arima) * 100
@@ -243,25 +273,21 @@ if uploaded_file is not None:
         st.error("Ни одна модель не обучилась. Проверьте данные и установленные библиотеки.")
         st.stop()
 
-    # Выбор лучшей модели по RMSE
     best_name = min(results, key=lambda x: results[x]['rmse'])
     best = results[best_name]
     st.subheader(f"🏆 Лучшая модель: {best_name}")
     st.write(f"RMSE на тесте: {best['rmse']:.2f}")
     st.write(f"MAPE на тесте: {best['mape']:.2f}%")
 
-    # ========================== Обучение лучшей модели на всех данных =================
     full_ts = pd.concat([train, test])
     future_dates = pd.date_range(start=full_ts.index[-1] + pd.Timedelta(1, unit=freq),
                                  periods=horizon, freq=freq)
 
-    # Прогноз на будущее
     if best_name == 'Holt-Winters':
         model_full = ExponentialSmoothing(full_ts, trend='add', seasonal='add',
                                           seasonal_periods=seasonal_periods,
                                           initialization_method='estimated').fit()
         forecast = model_full.forecast(horizon)
-        # Доверительный интервал через get_prediction
         try:
             pred_result = model_full.get_prediction(start=future_dates[0], end=future_dates[-1])
             summary = pred_result.summary_frame(alpha=0.05)
@@ -278,17 +304,15 @@ if uploaded_file is not None:
         forecast, conf_int = model_full.predict(n_periods=horizon, return_conf_int=True, alpha=0.05)
         pi_lower = conf_int[:, 0]
         pi_upper = conf_int[:, 1]
-    else:  # ML модели
+    else:
         model_full = best['model']
-        # Рекурсивный прогноз на будущее
         forecast = recursive_forecast(model_full, full_ts, future_dates, lags, freq)
-        # Доверительный интервал на основе ошибок на тесте
         test_pred = best['pred_test']
         resid_std = np.std(np.array(test) - np.array(test_pred))
         pi_lower = forecast - 1.96 * resid_std
         pi_upper = forecast + 1.96 * resid_std
 
-    # ========================== Интерактивный график Plotly ===========================
+    # Интерактивный график Plotly
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=train.index, y=train.values, mode='lines', name='Тренировочные данные',
                              line=dict(color='blue')))
@@ -296,22 +320,19 @@ if uploaded_file is not None:
                              line=dict(color='orange')))
     fig.add_trace(go.Scatter(x=future_dates, y=forecast, mode='lines+markers', name='Прогноз',
                              line=dict(color='green')))
-    # Доверительный интервал
     fig.add_trace(go.Scatter(x=np.concatenate([future_dates, future_dates[::-1]]),
                              y=np.concatenate([pi_upper, pi_lower[::-1]]),
                              fill='toself', fillcolor='rgba(0,100,80,0.2)',
                              line=dict(color='rgba(255,255,255,0)'),
                              name='95% доверительный интервал'))
-    # Вертикальная линия разделения
     split_date = test.index[0]
     fig.add_vline(x=split_date, line_dash="dash", line_color="red", annotation_text="Начало прогноза")
     fig.update_layout(title=f"Прогноз по модели {best_name}",
                       xaxis_title="Дата", yaxis_title="Total")
     st.plotly_chart(fig, use_container_width=True)
 
-    # ========================== Генерация PDF отчета ==================================
+    # PDF-отчёт
     if st.button("📄 Скачать PDF-отчёт"):
-        # Создаем PDF
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", size=12)
@@ -327,7 +348,6 @@ if uploaded_file is not None:
         pdf.cell(200, 10, txt="Таблица прогнозных значений:", ln=1)
         pdf.ln(2)
 
-        # Таблица прогнозов
         pdf.set_font("Arial", 'B', 9)
         pdf.cell(50, 8, "Дата", 1)
         pdf.cell(40, 8, "Прогноз", 1)
@@ -342,7 +362,6 @@ if uploaded_file is not None:
             pdf.cell(40, 8, f"{pi_upper[i]:.2f}", 1)
             pdf.ln()
 
-        # График matplotlib для PDF
         fig_mpl, ax = plt.subplots(figsize=(8, 4))
         ax.plot(train.index, train.values, label='Train', color='blue')
         ax.plot(test.index, test.values, label='Test', color='orange')
@@ -351,7 +370,6 @@ if uploaded_file is not None:
         ax.axvline(split_date, color='red', linestyle='--', label='Forecast start')
         ax.legend()
         ax.set_title(f'Forecast: {best_name}')
-        # Сохраняем график в байты
         buf = BytesIO()
         fig_mpl.savefig(buf, format='png', dpi=100)
         buf.seek(0)
@@ -359,7 +377,6 @@ if uploaded_file is not None:
         pdf.image(buf, x=10, w=190)
         buf.close()
 
-        # Отдаём PDF
         pdf_bytes = pdf.output(dest='S').encode('latin-1')
         b64 = base64.b64encode(pdf_bytes).decode()
         href = f'<a href="data:application/pdf;base64,{b64}" download="forecast_report.pdf">Скачать PDF</a>'
