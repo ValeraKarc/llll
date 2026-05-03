@@ -123,7 +123,7 @@ if uploaded_file is not None:
         enc = encoding_choice
 
     try:
-        df = pd.read_csv(uploaded_file, encoding=enc, errors='replace' if enc == 'utf-8' else 'strict')
+        df = pd.read_csv(uploaded_file, encoding=enc)  # УБРАНО 'errors'
     except Exception as e:
         st.error(f"Ошибка чтения файла: {e}")
         st.stop()
