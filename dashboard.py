@@ -6,9 +6,16 @@ import plotly.graph_objects as go
 from io import BytesIO
 import base64
 import warnings
+import os
 warnings.filterwarnings('ignore')
 
-# ML / Stats
+# Настройка Matplotlib
+import matplotlib
+if 'DISPLAY' not in os.environ and 'MPLBACKEND' not in os.environ:
+    matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# ML и статистические модели
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
 try:
@@ -29,8 +36,11 @@ try:
 except ImportError:
     HAS_PMDARIMA = False
 
-from fpdf import FPDF
-import matplotlib.pyplot as plt
+# PDF
+try:
+    from fpdf import FPDF
+except ImportError:
+    FPDF = None
 
 # ===================== Вспомогательные функции =====================
 def mean_absolute_percentage_error(y_true, y_pred):
@@ -45,14 +55,15 @@ def create_lag_features(series, lags, freq_str):
     for lag in range(1, lags + 1):
         df_feat[f'lag_{lag}'] = series.shift(lag)
     df_feat['rolling_mean_3'] = series.rolling(window=3).mean()
-    if 'h' in str(freq_str).lower():
+    freq_lower = str(freq_str).lower()
+    if 'h' in freq_lower:
         df_feat['hour'] = series.index.hour
         df_feat['dayofweek'] = series.index.dayofweek
-    elif 'd' in str(freq_str).lower():
+    elif 'd' in freq_lower:
         df_feat['dayofweek'] = series.index.dayofweek
-    elif 'w' in str(freq_str).lower():
+    elif 'w' in freq_lower:
         df_feat['weekofyear'] = series.index.isocalendar().week.astype(int)
-    elif 'm' in str(freq_str).lower():
+    elif 'm' in freq_lower:
         df_feat['month'] = series.index.month
     df_feat = df_feat.dropna()
     return df_feat, series[df_feat.index]
@@ -60,23 +71,22 @@ def create_lag_features(series, lags, freq_str):
 def recursive_forecast(model, initial_series, forecast_dates, lags, freq_str):
     history = initial_series.copy()
     preds = []
+    freq_lower = str(freq_str).lower()
     for dt in forecast_dates:
         last_vals = history.iloc[-lags:]
         features = {}
         for i in range(1, lags + 1):
             features[f'lag_{i}'] = last_vals.iloc[-i] if len(last_vals) >= i else np.nan
         features['rolling_mean_3'] = last_vals.iloc[-3:].mean() if len(last_vals) >= 3 else np.mean(last_vals)
-
-        if 'h' in str(freq_str).lower():
+        if 'h' in freq_lower:
             features['hour'] = dt.hour
             features['dayofweek'] = dt.dayofweek
-        elif 'd' in str(freq_str).lower():
+        elif 'd' in freq_lower:
             features['dayofweek'] = dt.dayofweek
-        elif 'w' in str(freq_str).lower():
+        elif 'w' in freq_lower:
             features['weekofyear'] = dt.isocalendar().week
-        elif 'm' in str(freq_str).lower():
+        elif 'm' in freq_lower:
             features['month'] = dt.month
-
         X = pd.DataFrame([features])
         pred = model.predict(X)[0]
         preds.append(pred)
@@ -94,6 +104,7 @@ def train_and_evaluate_ml(model, train_series, test_index, lags, freq_str):
 st.set_page_config(layout="wide")
 st.title("🔮 Прогнозирование временных рядов продаж")
 
+# Кодировка
 encoding_options = ['auto', 'utf-8', 'cp1251', 'latin1', 'iso-8859-1', 'cp1252']
 encoding_choice = st.selectbox("Кодировка CSV-файла", encoding_options, index=0)
 
@@ -115,7 +126,6 @@ if uploaded_file is not None:
     else:
         enc = encoding_choice
 
-    # Чтение CSV
     try:
         df = pd.read_csv(uploaded_file, encoding=enc, errors='replace' if enc == 'utf-8' else 'strict')
     except Exception as e:
@@ -175,13 +185,12 @@ if uploaded_file is not None:
         st.stop()
     st.success(f"✅ Загружено {len(df)} записей")
 
-    # ===================== Параметры прогнозирования =====================
+    # Параметры прогноза
     freq_map = {'час': 'h', 'день': 'D', 'неделя': 'W-MON', 'месяц': 'MS'}
     freq_label = st.selectbox("Периодичность агрегации", list(freq_map.keys()))
     freq = freq_map[freq_label]
     horizon = st.number_input("Горизонт прогноза", min_value=1, max_value=100, value=10, step=1)
 
-    # Кнопка запуска
     if st.button("🚀 Создать прогноз"):
         ts = df.set_index('datetime').resample(freq)['total'].sum().dropna()
         if len(ts) < horizon + 5:
@@ -190,8 +199,8 @@ if uploaded_file is not None:
 
         train = ts.iloc[:-horizon]
         test = ts.iloc[-horizon:]
-        st.write(f"Тренировочный период: {train.index.min()} – {train.index.max()} ({len(train)} отсчетов)")
-        st.write(f"Тестовый период: {test.index.min()} – {test.index.max()} ({len(test)} отсчетов)")
+        st.write(f"Тренировочный период: {train.index.min()} – {train.index.max()} ({len(train)} точек)")
+        st.write(f"Тестовый период: {test.index.min()} – {test.index.max()} ({len(test)} точек)")
 
         # Сезонность и лаги
         if freq == 'h':
@@ -278,13 +287,13 @@ if uploaded_file is not None:
         st.write(f"RMSE на тесте: {best['rmse']:.2f}")
         st.write(f"MAPE на тесте: {best['mape']:.2f}%")
 
-        # Прогноз на будущее
+        # Финальный прогноз
         full_ts = pd.concat([train, test])
-        # Умное приращение для любой частоты
         if freq == 'MS':
             start_date = full_ts.index[-1] + pd.DateOffset(months=1)
         else:
-            start_date = full_ts.index[-1] + pd.Timedelta(1, unit=freq if freq != 'W-MON' else 'W')
+            unit = freq if freq != 'W-MON' else 'W'
+            start_date = full_ts.index[-1] + pd.Timedelta(1, unit=unit)
         future_dates = pd.date_range(start=start_date, periods=horizon, freq=freq)
 
         if best_name == 'Holt-Winters':
@@ -305,14 +314,14 @@ if uploaded_file is not None:
                                        stepwise=True, trace=False)
             forecast, conf_int = model_full.predict(n_periods=horizon, return_conf_int=True, alpha=0.05)
             pi_lower, pi_upper = conf_int[:, 0], conf_int[:, 1]
-        else:  # ML
+        else:
             model_full = best['model']
             forecast = recursive_forecast(model_full, full_ts, future_dates, lags, freq)
             test_pred = best['pred_test']
             resid_std = np.std(np.array(test) - np.array(test_pred))
             pi_lower, pi_upper = forecast - 1.96*resid_std, forecast + 1.96*resid_std
 
-        # Интерактивный график
+        # График Plotly
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=train.index, y=train.values, name='Train', line=dict(color='blue')))
         fig.add_trace(go.Scatter(x=test.index, y=test.values, name='Test', line=dict(color='orange')))
@@ -330,48 +339,50 @@ if uploaded_file is not None:
 
         # PDF
         if st.button("📄 Скачать PDF-отчёт"):
-            pdf = FPDF()
-            pdf.add_page()
-            pdf.set_font("Arial", size=12)
-            pdf.cell(200, 10, "Отчёт по прогнозированию", ln=1, align="C")
-            pdf.ln(10)
-            pdf.set_font("Arial", size=10)
-            pdf.cell(200, 10, f"Модель: {best_name}", ln=1)
-            pdf.cell(200, 10, f"Период: {freq_label}", ln=1)
-            pdf.cell(200, 10, f"Горизонт: {horizon}", ln=1)
-            pdf.cell(200, 10, f"RMSE: {best['rmse']:.2f}", ln=1)
-            pdf.cell(200, 10, f"MAPE: {best['mape']:.2f}%", ln=1)
-            pdf.ln(5)
-            pdf.set_font("Arial", 'B', 9)
-            pdf.cell(50, 8, "Дата", 1)
-            pdf.cell(40, 8, "Прогноз", 1)
-            pdf.cell(40, 8, "Нижняя", 1)
-            pdf.cell(40, 8, "Верхняя", 1)
-            pdf.ln()
-            pdf.set_font("Arial", size=9)
-            for i, dt in enumerate(future_dates):
-                pdf.cell(50, 8, dt.strftime("%Y-%m-%d %H:%M"), 1)
-                pdf.cell(40, 8, f"{forecast[i]:.2f}", 1)
-                pdf.cell(40, 8, f"{pi_lower[i]:.2f}", 1)
-                pdf.cell(40, 8, f"{pi_upper[i]:.2f}", 1)
+            if FPDF is None:
+                st.error("Библиотека fpdf не установлена. Добавьте 'fpdf' в requirements.txt")
+            else:
+                pdf = FPDF()
+                pdf.add_page()
+                pdf.set_font("Arial", size=12)
+                pdf.cell(200, 10, "Отчёт по прогнозированию", ln=1, align="C")
+                pdf.ln(10)
+                pdf.set_font("Arial", size=10)
+                pdf.cell(200, 10, f"Модель: {best_name}", ln=1)
+                pdf.cell(200, 10, f"Период: {freq_label}", ln=1)
+                pdf.cell(200, 10, f"Горизонт: {horizon}", ln=1)
+                pdf.cell(200, 10, f"RMSE: {best['rmse']:.2f}", ln=1)
+                pdf.cell(200, 10, f"MAPE: {best['mape']:.2f}%", ln=1)
+                pdf.ln(5)
+                pdf.set_font("Arial", 'B', 9)
+                pdf.cell(50, 8, "Дата", 1)
+                pdf.cell(40, 8, "Прогноз", 1)
+                pdf.cell(40, 8, "Нижняя", 1)
+                pdf.cell(40, 8, "Верхняя", 1)
                 pdf.ln()
+                pdf.set_font("Arial", size=9)
+                for i, dt in enumerate(future_dates):
+                    pdf.cell(50, 8, dt.strftime("%Y-%m-%d %H:%M"), 1)
+                    pdf.cell(40, 8, f"{forecast[i]:.2f}", 1)
+                    pdf.cell(40, 8, f"{pi_lower[i]:.2f}", 1)
+                    pdf.cell(40, 8, f"{pi_upper[i]:.2f}", 1)
+                    pdf.ln()
 
-            # График для PDF
-            fig_mpl, ax = plt.subplots(figsize=(8,4))
-            ax.plot(train.index, train.values, label='Train')
-            ax.plot(test.index, test.values, label='Test')
-            ax.plot(future_dates, forecast, label='Forecast')
-            ax.fill_between(future_dates, pi_lower, pi_upper, alpha=0.2)
-            ax.axvline(test.index[0], color='red', linestyle='--')
-            ax.legend()
-            buf = BytesIO()
-            fig_mpl.savefig(buf, format='png', dpi=100)
-            buf.seek(0)
-            plt.close(fig_mpl)
-            pdf.image(buf, x=10, w=190)
-            buf.close()
+                fig_mpl, ax = plt.subplots(figsize=(8,4))
+                ax.plot(train.index, train.values, label='Train')
+                ax.plot(test.index, test.values, label='Test')
+                ax.plot(future_dates, forecast, label='Forecast')
+                ax.fill_between(future_dates, pi_lower, pi_upper, alpha=0.2)
+                ax.axvline(test.index[0], color='red', linestyle='--')
+                ax.legend()
+                buf = BytesIO()
+                fig_mpl.savefig(buf, format='png', dpi=100)
+                buf.seek(0)
+                plt.close(fig_mpl)
+                pdf.image(buf, x=10, w=190)
+                buf.close()
 
-            pdf_bytes = pdf.output(dest='S').encode('latin-1')
-            b64 = base64.b64encode(pdf_bytes).decode()
-            href = f'<a href="data:application/pdf;base64,{b64}" download="forecast_report.pdf">Скачать PDF</a>'
-            st.markdown(href, unsafe_allow_html=True)
+                pdf_bytes = pdf.output(dest='S').encode('latin-1')
+                b64 = base64.b64encode(pdf_bytes).decode()
+                href = f'<a href="data:application/pdf;base64,{b64}" download="forecast_report.pdf">Скачать PDF</a>'
+                st.markdown(href, unsafe_allow_html=True)
