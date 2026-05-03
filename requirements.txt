@@ -1,6 +1,11 @@
 streamlit
-polars
 pandas
-plotly
-statsmodels
 numpy
+plotly
+scikit-learn
+xgboost
+lightgbm
+statsmodels
+pmdarima
+fpdf
+matplotlib
