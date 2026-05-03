@@ -5,11 +5,11 @@ from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from io import BytesIO
 import base64
-import warnings
 import os
+import warnings
 warnings.filterwarnings('ignore')
 
-# Настройка Matplotlib
+# Настройка бэкенда Matplotlib для Streamlit Cloud
 import matplotlib
 if 'DISPLAY' not in os.environ and 'MPLBACKEND' not in os.environ:
     matplotlib.use('Agg')
@@ -36,8 +36,8 @@ try:
 except ImportError:
     HAS_PMDARIMA = False
 
+# PDF-отчёт
 from fpdf import FPDF
-from pandas.tseries.frequencies import to_offset
 
 # ===================== Вспомогательные функции =====================
 def mean_absolute_percentage_error(y_true, y_pred):
@@ -97,17 +97,18 @@ def train_and_evaluate_ml(model, train_series, test_index, lags, freq_str):
     model.fit(X_train_full, y_train_full)
     return recursive_forecast(model, train_series, test_index, lags, freq_str)
 
-# ===================== Интерфейс Streamlit =====================
+# ===================== Интерфейс приложения =====================
 st.set_page_config(layout="wide")
 st.title("🔮 Прогнозирование временных рядов продаж")
 
+# Выбор кодировки
 encoding_options = ['auto', 'utf-8', 'cp1251', 'latin1', 'iso-8859-1', 'cp1252']
 encoding_choice = st.selectbox("Кодировка CSV-файла", encoding_options, index=0)
 
 uploaded_file = st.file_uploader("Загрузите CSV-файл с данными", type=["csv"])
 
 if uploaded_file is not None:
-    # Определение кодировки
+    # ---------- Шаг 1. Кодировка ----------
     if encoding_choice == 'auto':
         content = uploaded_file.read()
         try:
@@ -122,20 +123,21 @@ if uploaded_file is not None:
     else:
         enc = encoding_choice
 
+    # ---------- Шаг 2. Чтение CSV ----------
     try:
         df = pd.read_csv(uploaded_file, encoding=enc)
     except Exception as e:
         st.error(f"Ошибка чтения файла: {e}")
         st.stop()
 
-    # Проверка столбцов
+    # ---------- Шаг 3. Проверка столбцов ----------
     required = ['date', 'time', 'category', 'product', 'quantity', 'price', 'total']
     missing = [col for col in required if col not in df.columns]
     if missing:
         st.error(f"❌ Отсутствуют столбцы: {', '.join(missing)}")
         st.stop()
 
-    # Парсинг даты и времени
+    # ---------- Шаг 4. Парсинг даты и времени ----------
     date_series = df['date'].astype(str)
     time_series = df['time'].astype(str)
     time_is_empty = time_series.str.replace(r'[\s\.]', '', regex=True).str.len().sum() == 0
@@ -170,7 +172,7 @@ if uploaded_file is not None:
             st.error("Не удалось распарсить даты.")
             st.stop()
 
-    # Очистка
+    # ---------- Шаг 5. Очистка ----------
     df.dropna(subset=['datetime'], inplace=True)
     for col in ['quantity', 'price', 'total']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -181,138 +183,139 @@ if uploaded_file is not None:
         st.stop()
     st.success(f"✅ Загружено {len(df)} записей")
 
-    # Параметры прогноза
+    # ---------- Шаг 6. Настройки прогноза ----------
     freq_map = {'час': 'h', 'день': 'D', 'неделя': 'W-MON', 'месяц': 'MS'}
     freq_label = st.selectbox("Периодичность агрегации", list(freq_map.keys()))
     freq = freq_map[freq_label]
     horizon = st.number_input("Горизонт прогноза", min_value=1, max_value=100, value=10, step=1)
 
+    # ---------- Шаг 7. Запуск моделирования ----------
     if st.button("🚀 Создать прогноз"):
-        ts = df.set_index('datetime').resample(freq)['total'].sum().dropna()
-        if len(ts) < horizon + 5:
-            st.error(f"Недостаточно данных: нужно минимум {horizon + 5} точек, а у вас {len(ts)}")
-            st.stop()
+        with st.spinner("Обучение моделей... Это может занять некоторое время."):
+            # Агрегация ряда
+            ts = df.set_index('datetime').resample(freq)['total'].sum().dropna()
+            if len(ts) < horizon + 5:
+                st.error(f"Недостаточно данных: минимум {horizon+5} точек, а в ряду {len(ts)}.")
+                st.stop()
 
-        train = ts.iloc[:-horizon]
-        test = ts.iloc[-horizon:]
-        st.write(f"Тренировочный период: {train.index.min()} – {train.index.max()} ({len(train)} точек)")
-        st.write(f"Тестовый период: {test.index.min()} – {test.index.max()} ({len(test)} точек)")
+            train = ts.iloc[:-horizon]
+            test = ts.iloc[-horizon:]
 
-        # Сезонность и лаги
-        if freq == 'h':
-            seasonal_periods = 24
-        elif freq == 'D':
-            seasonal_periods = 7
-        elif freq == 'W-MON':
-            seasonal_periods = 52
-        else:
-            seasonal_periods = 12
-        if seasonal_periods >= len(train):
-            seasonal_periods = max(2, len(train) // 2)
-        lags = min(5, len(train) // 2)
+            # Сезонность
+            if freq == 'h':
+                seasonal_periods = 24
+            elif freq == 'D':
+                seasonal_periods = 7
+            elif freq == 'W-MON':
+                seasonal_periods = 52
+            else:  # 'MS'
+                seasonal_periods = 12
+            if seasonal_periods >= len(train):
+                seasonal_periods = max(2, len(train) // 2)
+            lags = min(5, len(train) // 2)
 
-        results = {}
+            results = {}
 
-        # 1. Holt-Winters
-        try:
-            hw = ExponentialSmoothing(train, trend='add', seasonal='add',
-                                      seasonal_periods=seasonal_periods,
-                                      initialization_method='estimated').fit()
-            pred_hw = hw.forecast(horizon)
-            rmse = np.sqrt(mean_squared_error(test, pred_hw))
-            mape = mean_absolute_percentage_error(test, pred_hw) * 100
-            results['Holt-Winters'] = {'rmse': rmse, 'mape': mape, 'pred_test': pred_hw, 'model': hw}
-        except Exception as e:
-            st.warning(f"Holt-Winters: {e}")
-
-        # 2. ARIMA
-        if HAS_PMDARIMA:
+            # Holt-Winters
             try:
-                arima = pm.auto_arima(train, seasonal=True, m=seasonal_periods,
-                                      suppress_warnings=True, error_action='ignore',
-                                      stepwise=True, trace=False)
-                pred_arima = arima.predict(n_periods=horizon)
-                rmse = np.sqrt(mean_squared_error(test, pred_arima))
-                mape = mean_absolute_percentage_error(test, pred_arima) * 100
-                results['ARIMA'] = {'rmse': rmse, 'mape': mape, 'pred_test': pred_arima, 'model': arima}
+                model = ExponentialSmoothing(train, trend='add', seasonal='add',
+                                             seasonal_periods=seasonal_periods,
+                                             initialization_method='estimated').fit()
+                pred_test = model.forecast(horizon)
+                rmse = np.sqrt(mean_squared_error(test, pred_test))
+                mape = mean_absolute_percentage_error(test, pred_test) * 100
+                results['Holt-Winters'] = {'rmse': rmse, 'mape': mape, 'pred_test': pred_test, 'model': model}
             except Exception as e:
-                st.warning(f"ARIMA: {e}")
+                st.warning(f"Holt-Winters не обучена: {e}")
 
-        # 3. Random Forest
-        try:
-            rf = RandomForestRegressor(n_estimators=100, random_state=42)
-            pred_rf = train_and_evaluate_ml(rf, train, test.index, lags, freq)
-            if pred_rf is not None:
-                rmse = np.sqrt(mean_squared_error(test, pred_rf))
-                mape = mean_absolute_percentage_error(test, pred_rf) * 100
-                results['Random Forest'] = {'rmse': rmse, 'mape': mape, 'pred_test': pred_rf, 'model': rf}
-        except Exception as e:
-            st.warning(f"Random Forest: {e}")
+            # ARIMA
+            if HAS_PMDARIMA:
+                try:
+                    model = pm.auto_arima(train, seasonal=True, m=seasonal_periods,
+                                          suppress_warnings=True, error_action='ignore',
+                                          stepwise=True, trace=False)
+                    pred_test = model.predict(n_periods=horizon)
+                    rmse = np.sqrt(mean_squared_error(test, pred_test))
+                    mape = mean_absolute_percentage_error(test, pred_test) * 100
+                    results['ARIMA'] = {'rmse': rmse, 'mape': mape, 'pred_test': pred_test, 'model': model}
+                except Exception as e:
+                    st.warning(f"ARIMA не обучена: {e}")
+            else:
+                st.info("ARIMA пропущена (pmdarima не установлен)")
 
-        # 4. XGBoost
-        if HAS_XGB:
+            # Random Forest
             try:
-                xgb = XGBRegressor(n_estimators=100, random_state=42, verbosity=0)
-                pred_xgb = train_and_evaluate_ml(xgb, train, test.index, lags, freq)
-                if pred_xgb is not None:
-                    rmse = np.sqrt(mean_squared_error(test, pred_xgb))
-                    mape = mean_absolute_percentage_error(test, pred_xgb) * 100
-                    results['XGBoost'] = {'rmse': rmse, 'mape': mape, 'pred_test': pred_xgb, 'model': xgb}
+                rf = RandomForestRegressor(n_estimators=100, random_state=42)
+                pred_rf = train_and_evaluate_ml(rf, train, test.index, lags, freq)
+                if pred_rf is not None:
+                    rmse = np.sqrt(mean_squared_error(test, pred_rf))
+                    mape = mean_absolute_percentage_error(test, pred_rf) * 100
+                    results['Random Forest'] = {'rmse': rmse, 'mape': mape, 'pred_test': pred_rf, 'model': rf}
             except Exception as e:
-                st.warning(f"XGBoost: {e}")
+                st.warning(f"Random Forest не обучена: {e}")
 
-        # 5. LightGBM
-        if HAS_LGB:
-            try:
-                lgb = LGBMRegressor(n_estimators=100, random_state=42, verbose=-1)
-                pred_lgb = train_and_evaluate_ml(lgb, train, test.index, lags, freq)
-                if pred_lgb is not None:
-                    rmse = np.sqrt(mean_squared_error(test, pred_lgb))
-                    mape = mean_absolute_percentage_error(test, pred_lgb) * 100
-                    results['LightGBM'] = {'rmse': rmse, 'mape': mape, 'pred_test': pred_lgb, 'model': lgb}
-            except Exception as e:
-                st.warning(f"LightGBM: {e}")
+            # XGBoost
+            if HAS_XGB:
+                try:
+                    xgb = XGBRegressor(n_estimators=100, random_state=42, verbosity=0)
+                    pred_xgb = train_and_evaluate_ml(xgb, train, test.index, lags, freq)
+                    if pred_xgb is not None:
+                        rmse = np.sqrt(mean_squared_error(test, pred_xgb))
+                        mape = mean_absolute_percentage_error(test, pred_xgb) * 100
+                        results['XGBoost'] = {'rmse': rmse, 'mape': mape, 'pred_test': pred_xgb, 'model': xgb}
+                except Exception as e:
+                    st.warning(f"XGBoost не обучена: {e}")
 
-        if not results:
-            st.error("Ни одна модель не обучилась.")
-            st.stop()
+            # LightGBM
+            if HAS_LGB:
+                try:
+                    lgb = LGBMRegressor(n_estimators=100, random_state=42, verbose=-1)
+                    pred_lgb = train_and_evaluate_ml(lgb, train, test.index, lags, freq)
+                    if pred_lgb is not None:
+                        rmse = np.sqrt(mean_squared_error(test, pred_lgb))
+                        mape = mean_absolute_percentage_error(test, pred_lgb) * 100
+                        results['LightGBM'] = {'rmse': rmse, 'mape': mape, 'pred_test': pred_lgb, 'model': lgb}
+                except Exception as e:
+                    st.warning(f"LightGBM не обучена: {e}")
 
-        # --- Карточки с лучшими метриками ---
+            if not results:
+                st.error("Ни одна модель не обучилась. Проверьте данные и библиотеки.")
+                st.stop()
+
+        # ---------- Шаг 8. Вывод метрик ----------
         best_name = min(results, key=lambda x: results[x]['rmse'])
-        best = results[best_name]
-
-        st.subheader("📊 Результаты прогнозирования")
+        st.subheader("🏆 Результаты прогнозирования")
         col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("🏆 Лучшая модель", best_name)
-        with col2:
-            st.metric("📉 RMSE на тесте", f"{best['rmse']:.2f}")
-        with col3:
-            st.metric("📈 MAPE на тесте", f"{best['mape']:.2f}%")
+        col1.metric("Лучшая модель", best_name)
+        col2.metric("RMSE на тесте", f"{results[best_name]['rmse']:.2f}")
+        col3.metric("MAPE на тесте", f"{results[best_name]['mape']:.2f}%")
 
-        # --- Таблица сравнения всех моделей ---
-        st.write("**Сводка по всем моделям:**")
-        summary_data = []
-        for name, res in results.items():
-            summary_data.append({
-                'Модель': name,
-                'RMSE': f"{res['rmse']:.2f}",
-                'MAPE': f"{res['mape']:.2f}%"
-            })
-        st.dataframe(pd.DataFrame(summary_data).sort_values('RMSE'), use_container_width=True)
+        # Сводная таблица
+        summary_df = pd.DataFrame([
+            {'Модель': name, 'RMSE': f"{res['rmse']:.2f}", 'MAPE': f"{res['mape']:.2f}%"}
+            for name, res in results.items()
+        ]).sort_values('RMSE')
+        st.dataframe(summary_df, use_container_width=True)
 
-        # --- Выбор модели для графика (по умолчанию лучшая) ---
-        selected_model = st.selectbox(
-            "Выберите модель для отображения графика",
-            list(results.keys()),
-            index=list(results.keys()).index(best_name)
-        )
+        # ---------- Шаг 9. Выбор модели для графика ----------
+        selected_model = st.selectbox("Модель для графика", list(results.keys()),
+                                      index=list(results.keys()).index(best_name))
         selected = results[selected_model]
 
-        # --- Финальный прогноз для выбранной модели ---
+        # ---------- Шаг 10. Прогноз на полных данных ----------
         full_ts = pd.concat([train, test])
-        offset = to_offset(freq)
-        start_date = full_ts.index[-1] + offset
+
+        # Безопасное создание будущих дат (без to_offset)
+        if freq == 'MS':
+            start_date = full_ts.index[-1] + pd.DateOffset(months=1)
+        elif freq == 'W-MON':
+            start_date = full_ts.index[-1] + pd.offsets.Week(weekday=0)
+        elif freq == 'h':
+            start_date = full_ts.index[-1] + pd.Timedelta(hours=1)
+        elif freq == 'D':
+            start_date = full_ts.index[-1] + pd.DateOffset(days=1)
+        else:
+            start_date = full_ts.index[-1] + pd.Timedelta(1, unit=freq)
         future_dates = pd.date_range(start=start_date, periods=horizon, freq=freq)
 
         if selected_model == 'Holt-Winters':
@@ -322,81 +325,74 @@ if uploaded_file is not None:
             forecast = model_full.forecast(horizon)
             try:
                 pred_obj = model_full.get_prediction(start=future_dates[0], end=future_dates[-1])
-                summary = pred_obj.summary_frame(alpha=0.05)
-                pi_lower, pi_upper = summary['pi_lower'].values, summary['pi_upper'].values
+                ci = pred_obj.summary_frame(alpha=0.05)
+                lower, upper = ci['pi_lower'].values, ci['pi_upper'].values
             except:
                 resid_std = np.std(train - selected['pred_test'])
-                pi_lower, pi_upper = forecast - 1.96*resid_std, forecast + 1.96*resid_std
+                lower, upper = forecast - 1.96*resid_std, forecast + 1.96*resid_std
         elif selected_model == 'ARIMA':
             model_full = pm.auto_arima(full_ts, seasonal=True, m=seasonal_periods,
                                        suppress_warnings=True, error_action='ignore',
                                        stepwise=True, trace=False)
             forecast, conf_int = model_full.predict(n_periods=horizon, return_conf_int=True, alpha=0.05)
-            pi_lower, pi_upper = conf_int[:, 0], conf_int[:, 1]
-        else:  # ML модели
+            lower, upper = conf_int[:, 0], conf_int[:, 1]
+        else:
             model_full = selected['model']
             forecast = recursive_forecast(model_full, full_ts, future_dates, lags, freq)
-            test_pred = selected['pred_test']
-            resid_std = np.std(np.array(test) - np.array(test_pred))
-            pi_lower, pi_upper = forecast - 1.96*resid_std, forecast + 1.96*resid_std
+            resid_std = np.std(np.array(test) - np.array(selected['pred_test']))
+            lower, upper = forecast - 1.96*resid_std, forecast + 1.96*resid_std
 
-        # --- Интерактивный график с зумом ---
-        st.subheader(f"📉 Прогноз модели: **{selected_model}**")
+        # ---------- Шаг 11. Интерактивный график ----------
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=train.index, y=train.values, mode='lines',
-                                 name='Тренировочные', line=dict(color='blue')))
-        fig.add_trace(go.Scatter(x=test.index, y=test.values, mode='lines+markers',
-                                 name='Тестовые', line=dict(color='orange')))
-        fig.add_trace(go.Scatter(x=future_dates, y=forecast, mode='lines+markers',
-                                 name='Прогноз', line=dict(color='green')))
-        fig.add_trace(go.Scatter(
-            x=np.concatenate([future_dates, future_dates[::-1]]),
-            y=np.concatenate([pi_upper, pi_lower[::-1]]),
-            fill='toself', fillcolor='rgba(0,100,80,0.2)',
-            line=dict(color='rgba(255,255,255,0)'),
-            name='95% доверит. интервал'
-        ))
+        fig.add_trace(go.Scatter(x=train.index, y=train.values, name='Train', line=dict(color='blue')))
+        fig.add_trace(go.Scatter(x=test.index, y=test.values, name='Test', line=dict(color='orange')))
+        fig.add_trace(go.Scatter(x=future_dates, y=forecast, name='Forecast', line=dict(color='green')))
+        fig.add_trace(go.Scatter(x=np.concatenate([future_dates, future_dates[::-1]]),
+                                 y=np.concatenate([upper, lower[::-1]]),
+                                 fill='toself', fillcolor='rgba(0,100,80,0.2)',
+                                 line=dict(color='rgba(255,255,255,0)'),
+                                 name='95% доверит. интервал'))
         fig.add_vline(x=test.index[0], line_dash="dash", line_color="red",
                       annotation_text="Начало прогноза")
-        fig.update_layout(title=f"Прогноз • {selected_model}",
-                          xaxis_title="Дата", yaxis_title="Total",
+        fig.update_layout(title=f"Прогноз ({selected_model})",
+                          xaxis_title="Дата", yaxis_title="Сумма (total)",
                           hovermode='x unified')
-        st.plotly_chart(fig, use_container_width=True,
-                        config={'scrollZoom': True, 'displayModeBar': True})
+        st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'displayModeBar': True})
 
-        # --- PDF-отчёт ---
+        # ---------- Шаг 12. Кнопка PDF ----------
         if st.button("📄 Скачать PDF-отчёт"):
             pdf = FPDF()
             pdf.add_page()
             pdf.set_font("Arial", size=12)
-            pdf.cell(200, 10, "Отчёт по прогнозированию", ln=1, align="C")
+            pdf.cell(200, 10, "Отчёт о прогнозировании", ln=1, align="C")
             pdf.ln(10)
             pdf.set_font("Arial", size=10)
             pdf.cell(200, 10, f"Модель: {selected_model}", ln=1)
-            pdf.cell(200, 10, f"Период: {freq_label}", ln=1)
-            pdf.cell(200, 10, f"Горизонт: {horizon}", ln=1)
+            pdf.cell(200, 10, f"Периодичность: {freq_label}", ln=1)
+            pdf.cell(200, 10, f"Горизонт: {horizon} периодов", ln=1)
             pdf.cell(200, 10, f"RMSE: {selected['rmse']:.2f}", ln=1)
             pdf.cell(200, 10, f"MAPE: {selected['mape']:.2f}%", ln=1)
             pdf.ln(5)
+            # Таблица прогнозов
             pdf.set_font("Arial", 'B', 9)
             pdf.cell(50, 8, "Дата", 1)
             pdf.cell(40, 8, "Прогноз", 1)
-            pdf.cell(40, 8, "Нижняя", 1)
-            pdf.cell(40, 8, "Верхняя", 1)
+            pdf.cell(40, 8, "Ниж.гр.", 1)
+            pdf.cell(40, 8, "Верх.гр.", 1)
             pdf.ln()
             pdf.set_font("Arial", size=9)
             for i, dt in enumerate(future_dates):
                 pdf.cell(50, 8, dt.strftime("%Y-%m-%d %H:%M"), 1)
                 pdf.cell(40, 8, f"{forecast[i]:.2f}", 1)
-                pdf.cell(40, 8, f"{pi_lower[i]:.2f}", 1)
-                pdf.cell(40, 8, f"{pi_upper[i]:.2f}", 1)
+                pdf.cell(40, 8, f"{lower[i]:.2f}", 1)
+                pdf.cell(40, 8, f"{upper[i]:.2f}", 1)
                 pdf.ln()
-
+            # График matplotlib для PDF
             fig_mpl, ax = plt.subplots(figsize=(8,4))
             ax.plot(train.index, train.values, label='Train')
             ax.plot(test.index, test.values, label='Test')
             ax.plot(future_dates, forecast, label='Forecast')
-            ax.fill_between(future_dates, pi_lower, pi_upper, alpha=0.2)
+            ax.fill_between(future_dates, lower, upper, alpha=0.2)
             ax.axvline(test.index[0], color='red', linestyle='--')
             ax.legend()
             buf = BytesIO()
