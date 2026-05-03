@@ -37,8 +37,6 @@ import matplotlib
 matplotlib.use('Agg')
 
 # ============================== Вспомогательные функции ==============================
-# ... (те же вспомогательные функции, что и в предыдущей версии: MAPE, create_lag_features, recursive_forecast, train_and_evaluate_ml)
-
 def mean_absolute_percentage_error(y_true, y_pred):
     y_true, y_pred = np.array(y_true), np.array(y_pred)
     mask = y_true != 0
@@ -94,9 +92,36 @@ def train_and_evaluate_ml(model, train_series, test_index, lags, freq_str):
 st.set_page_config(layout="wide")
 st.title("🔮 Прогнозирование временных рядов продаж")
 
+# Выбор кодировки перед загрузкой файла
+encoding_options = ['auto', 'utf-8', 'cp1251', 'latin1', 'iso-8859-1', 'cp1252']
+encoding_choice = st.selectbox("Кодировка CSV-файла", encoding_options, index=0)
+
 uploaded_file = st.file_uploader("Загрузите CSV-файл с данными", type=["csv"])
 if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file)
+    # Определяем кодировку
+    if encoding_choice == 'auto':
+        content = uploaded_file.read()
+        # Попытка определить кодировку с помощью chardet
+        try:
+            import chardet
+            result = chardet.detect(content)
+            enc = result['encoding']
+            if enc is None:
+                enc = 'utf-8'
+            st.info(f"Автоопределена кодировка: {enc}")
+        except ImportError:
+            st.warning("Библиотека chardet не установлена, используется UTF-8 с заменами.")
+            enc = 'utf-8'
+        uploaded_file.seek(0)  # сбрасываем указатель для последующего чтения
+    else:
+        enc = encoding_choice
+
+    # Чтение CSV с выбранной кодировкой
+    try:
+        df = pd.read_csv(uploaded_file, encoding=enc, encoding_errors='replace' if enc == 'utf-8' else 'strict')
+    except Exception as e:
+        st.error(f"Ошибка при чтении файла: {e}")
+        st.stop()
 
     # Проверка обязательных столбцов
     required = ['date', 'time', 'category', 'product', 'quantity', 'price', 'total']
@@ -105,25 +130,17 @@ if uploaded_file is not None:
         st.error(f"❌ Отсутствуют обязательные столбцы: {', '.join(missing)}")
         st.stop()
 
-    # --------------------------------------------------------------
-    # Гибкий парсинг даты и времени
-    # --------------------------------------------------------------
-    # Попробуем автоматически распознать форматы
+    # Гибкий парсинг даты и времени (без изменений)
     date_series = df['date'].astype(str)
     time_series = df['time'].astype(str)
-
-    # Если time пустой или содержит только точки/пробелы, считаем что дата уже содержит время
     time_is_empty = time_series.str.replace(r'[\s\.]', '', regex=True).str.len().sum() == 0
 
     if not time_is_empty:
-        # Пробуем объединить строки и парсить
         datetime_str = date_series + ' ' + time_series
         df['datetime'] = pd.to_datetime(datetime_str, errors='coerce')
     else:
-        # Только дата
         df['datetime'] = pd.to_datetime(date_series, errors='coerce')
 
-    # Считаем долю успешных парсингов
     success_rate = df['datetime'].notna().mean()
     if success_rate < 0.9:
         st.warning(f"Автоматически удалось распарсить только {success_rate:.1%} дат/времени. Укажите форматы вручную.")
@@ -136,9 +153,7 @@ if uploaded_file is not None:
                 with col2:
                     time_fmt = st.text_input("Формат времени", value="%H:%M:%S",
                                              help="Например: %H:%M, %I:%M %p, %H:%M:%S")
-
             if st.button("Применить форматы"):
-                # Парсим с указанными форматами
                 parsed_dates = pd.to_datetime(date_series, format=date_fmt, errors='coerce')
                 if not time_is_empty:
                     parsed_times = pd.to_datetime(time_series, format=time_fmt, errors='coerce').dt.time
@@ -148,15 +163,13 @@ if uploaded_file is not None:
                     )
                 else:
                     df['datetime'] = parsed_dates
-
                 success_rate = df['datetime'].notna().mean()
                 st.info(f"Новый процент распарсенных: {success_rate:.1%}")
         if df['datetime'].notna().sum() == 0:
             st.error("Не удалось распарсить даты даже после ручной настройки. Проверьте данные.")
             st.stop()
-    # --------------------------------------------------------------
 
-    # Очистка остальных данных
+    # Очистка данных
     try:
         df.dropna(subset=['datetime'], inplace=True)
         for col in ['quantity', 'price', 'total']:
@@ -171,11 +184,10 @@ if uploaded_file is not None:
         st.error(f"Ошибка обработки данных: {e}")
         st.stop()
 
-    # ----- Настройки прогноза (дальше без изменений) -----
+    # Настройки прогноза
     freq_map = {'час': 'H', 'день': 'D', 'неделя': 'W', 'месяц': 'M'}
     freq_label = st.selectbox("Периодичность агрегации", list(freq_map.keys()))
     freq = freq_map[freq_label]
-
     horizon = st.number_input("Горизонт прогноза (количество периодов)", min_value=1, max_value=100, value=10, step=1)
 
     ts = df.set_index('datetime').resample(freq)['total'].sum().dropna()
@@ -185,14 +197,10 @@ if uploaded_file is not None:
 
     train = ts.iloc[:-horizon]
     test = ts.iloc[-horizon:]
-
     st.write(f"Тренировочный период: {train.index.min()} – {train.index.max()} ({len(train)} отсчетов)")
     st.write(f"Тестовый период: {test.index.min()} – {test.index.max()} ({len(test)} отсчетов)")
 
-    # ... (оставшаяся часть кода без изменений: обучение моделей, сравнение, прогноз, график, PDF)
-    # Полный код идентичен предыдущей версии, добавлю сюда для полноты.
-
-    # Параметры сезонности
+    # Параметры сезонности и лагов
     if freq == 'H':
         seasonal_periods = 24
     elif freq == 'D':
@@ -219,7 +227,7 @@ if uploaded_file is not None:
     except Exception as e:
         st.warning(f"Holt-Winters не обучена: {e}")
 
-    # 2. ARIMA (SARIMA) через pmdarima
+    # 2. ARIMA
     if HAS_PMDARIMA:
         try:
             arima_model = pm.auto_arima(train, seasonal=True, m=seasonal_periods,
@@ -279,6 +287,7 @@ if uploaded_file is not None:
     st.write(f"RMSE на тесте: {best['rmse']:.2f}")
     st.write(f"MAPE на тесте: {best['mape']:.2f}%")
 
+    # Финальный прогноз
     full_ts = pd.concat([train, test])
     future_dates = pd.date_range(start=full_ts.index[-1] + pd.Timedelta(1, unit=freq),
                                  periods=horizon, freq=freq)
@@ -304,7 +313,7 @@ if uploaded_file is not None:
         forecast, conf_int = model_full.predict(n_periods=horizon, return_conf_int=True, alpha=0.05)
         pi_lower = conf_int[:, 0]
         pi_upper = conf_int[:, 1]
-    else:
+    else:  # ML модели
         model_full = best['model']
         forecast = recursive_forecast(model_full, full_ts, future_dates, lags, freq)
         test_pred = best['pred_test']
@@ -362,6 +371,7 @@ if uploaded_file is not None:
             pdf.cell(40, 8, f"{pi_upper[i]:.2f}", 1)
             pdf.ln()
 
+        # График для PDF
         fig_mpl, ax = plt.subplots(figsize=(8, 4))
         ax.plot(train.index, train.values, label='Train', color='blue')
         ax.plot(test.index, test.values, label='Test', color='orange')
