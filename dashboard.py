@@ -36,7 +36,6 @@ try:
 except ImportError:
     HAS_PMDARIMA = False
 
-# PDF-отчёт
 from fpdf import FPDF
 
 # ===================== Вспомогательные функции =====================
@@ -101,14 +100,13 @@ def train_and_evaluate_ml(model, train_series, test_index, lags, freq_str):
 st.set_page_config(layout="wide")
 st.title("🔮 Прогнозирование временных рядов продаж")
 
-# Выбор кодировки
 encoding_options = ['auto', 'utf-8', 'cp1251', 'latin1', 'iso-8859-1', 'cp1252']
 encoding_choice = st.selectbox("Кодировка CSV-файла", encoding_options, index=0)
 
 uploaded_file = st.file_uploader("Загрузите CSV-файл с данными", type=["csv"])
 
 if uploaded_file is not None:
-    # ---------- Шаг 1. Кодировка ----------
+    # ---------- Кодировка ----------
     if encoding_choice == 'auto':
         content = uploaded_file.read()
         try:
@@ -123,21 +121,21 @@ if uploaded_file is not None:
     else:
         enc = encoding_choice
 
-    # ---------- Шаг 2. Чтение CSV ----------
+    # ---------- Чтение CSV ----------
     try:
         df = pd.read_csv(uploaded_file, encoding=enc)
     except Exception as e:
         st.error(f"Ошибка чтения файла: {e}")
         st.stop()
 
-    # ---------- Шаг 3. Проверка столбцов ----------
+    # ---------- Проверка столбцов ----------
     required = ['date', 'time', 'category', 'product', 'quantity', 'price', 'total']
     missing = [col for col in required if col not in df.columns]
     if missing:
         st.error(f"❌ Отсутствуют столбцы: {', '.join(missing)}")
         st.stop()
 
-    # ---------- Шаг 4. Парсинг даты и времени ----------
+    # ---------- Парсинг даты и времени ----------
     date_series = df['date'].astype(str)
     time_series = df['time'].astype(str)
     time_is_empty = time_series.str.replace(r'[\s\.]', '', regex=True).str.len().sum() == 0
@@ -172,7 +170,7 @@ if uploaded_file is not None:
             st.error("Не удалось распарсить даты.")
             st.stop()
 
-    # ---------- Шаг 5. Очистка ----------
+    # ---------- Очистка ----------
     df.dropna(subset=['datetime'], inplace=True)
     for col in ['quantity', 'price', 'total']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -183,16 +181,14 @@ if uploaded_file is not None:
         st.stop()
     st.success(f"✅ Загружено {len(df)} записей")
 
-    # ---------- Шаг 6. Настройки прогноза ----------
+    # ---------- Настройки прогноза ----------
     freq_map = {'час': 'h', 'день': 'D', 'неделя': 'W-MON', 'месяц': 'MS'}
     freq_label = st.selectbox("Периодичность агрегации", list(freq_map.keys()))
     freq = freq_map[freq_label]
     horizon = st.number_input("Горизонт прогноза", min_value=1, max_value=100, value=10, step=1)
 
-    # ---------- Шаг 7. Запуск моделирования ----------
     if st.button("🚀 Создать прогноз"):
         with st.spinner("Обучение моделей... Это может занять некоторое время."):
-            # Агрегация ряда
             ts = df.set_index('datetime').resample(freq)['total'].sum().dropna()
             if len(ts) < horizon + 5:
                 st.error(f"Недостаточно данных: минимум {horizon+5} точек, а в ряду {len(ts)}.")
@@ -201,14 +197,13 @@ if uploaded_file is not None:
             train = ts.iloc[:-horizon]
             test = ts.iloc[-horizon:]
 
-            # Сезонность
             if freq == 'h':
                 seasonal_periods = 24
             elif freq == 'D':
                 seasonal_periods = 7
             elif freq == 'W-MON':
                 seasonal_periods = 52
-            else:  # 'MS'
+            else:
                 seasonal_periods = 12
             if seasonal_periods >= len(train):
                 seasonal_periods = max(2, len(train) // 2)
@@ -279,10 +274,10 @@ if uploaded_file is not None:
                     st.warning(f"LightGBM не обучена: {e}")
 
             if not results:
-                st.error("Ни одна модель не обучилась. Проверьте данные и библиотеки.")
+                st.error("Ни одна модель не обучилась.")
                 st.stop()
 
-        # ---------- Шаг 8. Вывод метрик ----------
+        # ---------- Вывод метрик ----------
         best_name = min(results, key=lambda x: results[x]['rmse'])
         st.subheader("🏆 Результаты прогнозирования")
         col1, col2, col3 = st.columns(3)
@@ -290,22 +285,20 @@ if uploaded_file is not None:
         col2.metric("RMSE на тесте", f"{results[best_name]['rmse']:.2f}")
         col3.metric("MAPE на тесте", f"{results[best_name]['mape']:.2f}%")
 
-        # Сводная таблица
         summary_df = pd.DataFrame([
             {'Модель': name, 'RMSE': f"{res['rmse']:.2f}", 'MAPE': f"{res['mape']:.2f}%"}
             for name, res in results.items()
         ]).sort_values('RMSE')
         st.dataframe(summary_df, use_container_width=True)
 
-        # ---------- Шаг 9. Выбор модели для графика ----------
+        # ---------- Выбор модели для графика ----------
         selected_model = st.selectbox("Модель для графика", list(results.keys()),
                                       index=list(results.keys()).index(best_name))
         selected = results[selected_model]
 
-        # ---------- Шаг 10. Прогноз на полных данных ----------
+        # ---------- Прогноз на полных данных ----------
         full_ts = pd.concat([train, test])
 
-        # Безопасное создание будущих дат (без to_offset)
         if freq == 'MS':
             start_date = full_ts.index[-1] + pd.DateOffset(months=1)
         elif freq == 'W-MON':
@@ -342,7 +335,7 @@ if uploaded_file is not None:
             resid_std = np.std(np.array(test) - np.array(selected['pred_test']))
             lower, upper = forecast - 1.96*resid_std, forecast + 1.96*resid_std
 
-        # ---------- Шаг 11. Интерактивный график ----------
+        # ---------- График ----------
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=train.index, y=train.values, name='Train', line=dict(color='blue')))
         fig.add_trace(go.Scatter(x=test.index, y=test.values, name='Test', line=dict(color='orange')))
@@ -352,14 +345,15 @@ if uploaded_file is not None:
                                  fill='toself', fillcolor='rgba(0,100,80,0.2)',
                                  line=dict(color='rgba(255,255,255,0)'),
                                  name='95% доверит. интервал'))
-        fig.add_vline(x=test.index[0], line_dash="dash", line_color="red",
+        # ИСПРАВЛЕНИЕ: передаём строку вместо Timestamp
+        fig.add_vline(x=test.index[0].strftime('%Y-%m-%d %H:%M:%S'), line_dash="dash", line_color="red",
                       annotation_text="Начало прогноза")
         fig.update_layout(title=f"Прогноз ({selected_model})",
                           xaxis_title="Дата", yaxis_title="Сумма (total)",
                           hovermode='x unified')
         st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'displayModeBar': True})
 
-        # ---------- Шаг 12. Кнопка PDF ----------
+        # ---------- PDF ----------
         if st.button("📄 Скачать PDF-отчёт"):
             pdf = FPDF()
             pdf.add_page()
@@ -373,7 +367,6 @@ if uploaded_file is not None:
             pdf.cell(200, 10, f"RMSE: {selected['rmse']:.2f}", ln=1)
             pdf.cell(200, 10, f"MAPE: {selected['mape']:.2f}%", ln=1)
             pdf.ln(5)
-            # Таблица прогнозов
             pdf.set_font("Arial", 'B', 9)
             pdf.cell(50, 8, "Дата", 1)
             pdf.cell(40, 8, "Прогноз", 1)
@@ -387,7 +380,7 @@ if uploaded_file is not None:
                 pdf.cell(40, 8, f"{lower[i]:.2f}", 1)
                 pdf.cell(40, 8, f"{upper[i]:.2f}", 1)
                 pdf.ln()
-            # График matplotlib для PDF
+
             fig_mpl, ax = plt.subplots(figsize=(8,4))
             ax.plot(train.index, train.values, label='Train')
             ax.plot(test.index, test.values, label='Test')
