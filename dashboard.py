@@ -45,19 +45,28 @@ def mean_absolute_percentage_error(y_true, y_pred):
     return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask]))
 
 def create_lag_features(series, lags, freq_str):
+    """Создаёт признаки для ML-моделей на основе одного временного ряда."""
     df_feat = pd.DataFrame(index=series.index)
     for lag in range(1, lags + 1):
         df_feat[f'lag_{lag}'] = series.shift(lag)
     df_feat['rolling_mean_3'] = series.rolling(window=3).mean()
-    if freq_str in ['H', 'D', 'W']:
+    
+    # Добавляем временные признаки в зависимости от частоты
+    if 'h' in freq_str.lower():  # часовые данные
         df_feat['hour'] = series.index.hour
         df_feat['dayofweek'] = series.index.dayofweek
-    if freq_str == 'M':
+    elif 'd' in freq_str.lower():  # дневные данные
+        df_feat['dayofweek'] = series.index.dayofweek
+    elif 'w' in freq_str.lower():  # недельные данные
+        df_feat['weekofyear'] = series.index.isocalendar().week.astype(int)
+    elif 'm' in freq_str.lower():  # месячные данные
         df_feat['month'] = series.index.month
+    
     df_feat = df_feat.dropna()
     return df_feat, series[df_feat.index]
 
 def recursive_forecast(model, initial_series, forecast_dates, lags, freq_str):
+    """Рекурсивный прогноз ML-модели на заданные даты."""
     history = initial_series.copy()
     preds = []
     for dt in forecast_dates:
@@ -69,11 +78,18 @@ def recursive_forecast(model, initial_series, forecast_dates, lags, freq_str):
             features['rolling_mean_3'] = last_vals.iloc[-3:].mean()
         else:
             features['rolling_mean_3'] = np.mean(last_vals)
-        if freq_str in ['H', 'D', 'W']:
+        
+        # Добавляем временные признаки
+        if 'h' in freq_str.lower():
             features['hour'] = dt.hour
             features['dayofweek'] = dt.dayofweek
-        if freq_str == 'M':
+        elif 'd' in freq_str.lower():
+            features['dayofweek'] = dt.dayofweek
+        elif 'w' in freq_str.lower():
+            features['weekofyear'] = dt.isocalendar().week
+        elif 'm' in freq_str.lower():
             features['month'] = dt.month
+            
         X = pd.DataFrame([features])
         pred = model.predict(X)[0]
         preds.append(pred)
@@ -81,6 +97,7 @@ def recursive_forecast(model, initial_series, forecast_dates, lags, freq_str):
     return np.array(preds)
 
 def train_and_evaluate_ml(model, train_series, test_index, lags, freq_str):
+    """Обучение ML модели и рекурсивный прогноз на тестовый период."""
     X_train_full, y_train_full = create_lag_features(train_series, lags, freq_str)
     if len(X_train_full) == 0:
         return None, None
@@ -101,7 +118,6 @@ if uploaded_file is not None:
     # Определяем кодировку
     if encoding_choice == 'auto':
         content = uploaded_file.read()
-        # Попытка определить кодировку с помощью chardet
         try:
             import chardet
             result = chardet.detect(content)
@@ -112,11 +128,11 @@ if uploaded_file is not None:
         except ImportError:
             st.warning("Библиотека chardet не установлена, используется UTF-8 с заменами.")
             enc = 'utf-8'
-        uploaded_file.seek(0)  # сбрасываем указатель для последующего чтения
+        uploaded_file.seek(0)
     else:
         enc = encoding_choice
 
-    # Чтение CSV с выбранной кодировкой
+    # Чтение CSV
     try:
         df = pd.read_csv(uploaded_file, encoding=enc, encoding_errors='replace' if enc == 'utf-8' else 'strict')
     except Exception as e:
@@ -130,7 +146,7 @@ if uploaded_file is not None:
         st.error(f"❌ Отсутствуют обязательные столбцы: {', '.join(missing)}")
         st.stop()
 
-    # Гибкий парсинг даты и времени (без изменений)
+    # Гибкий парсинг даты и времени
     date_series = df['date'].astype(str)
     time_series = df['time'].astype(str)
     time_is_empty = time_series.str.replace(r'[\s\.]', '', regex=True).str.len().sum() == 0
@@ -185,7 +201,13 @@ if uploaded_file is not None:
         st.stop()
 
     # Настройки прогноза
-    freq_map = {'час': 'H', 'день': 'D', 'неделя': 'W', 'месяц': 'M'}
+    # Актуальные частоты для pandas 2.2+
+    freq_map = {
+        'час': 'h',
+        'день': 'D',
+        'неделя': 'W-MON',
+        'месяц': 'MS'
+    }
     freq_label = st.selectbox("Периодичность агрегации", list(freq_map.keys()))
     freq = freq_map[freq_label]
     horizon = st.number_input("Горизонт прогноза (количество периодов)", min_value=1, max_value=100, value=10, step=1)
@@ -201,14 +223,15 @@ if uploaded_file is not None:
     st.write(f"Тестовый период: {test.index.min()} – {test.index.max()} ({len(test)} отсчетов)")
 
     # Параметры сезонности и лагов
-    if freq == 'H':
+    if freq == 'h':
         seasonal_periods = 24
     elif freq == 'D':
         seasonal_periods = 7
-    elif freq == 'W':
+    elif freq == 'W-MON':
         seasonal_periods = 52
-    else:  # M
+    else:  # MS
         seasonal_periods = 12
+
     if seasonal_periods >= len(train):
         seasonal_periods = max(2, len(train) // 2)
     lags = min(5, len(train) // 2)
@@ -287,9 +310,9 @@ if uploaded_file is not None:
     st.write(f"RMSE на тесте: {best['rmse']:.2f}")
     st.write(f"MAPE на тесте: {best['mape']:.2f}%")
 
-    # Финальный прогноз
+    # Финальный прогноз на полной выборке
     full_ts = pd.concat([train, test])
-    future_dates = pd.date_range(start=full_ts.index[-1] + pd.Timedelta(1, unit=freq),
+    future_dates = pd.date_range(start=full_ts.index[-1] + pd.Timedelta(1, unit='D' if freq.startswith(('h','D')) else 'W' if 'W' in freq else 'MS'),
                                  periods=horizon, freq=freq)
 
     if best_name == 'Holt-Winters':
