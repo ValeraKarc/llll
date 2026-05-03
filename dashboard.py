@@ -135,13 +135,16 @@ if uploaded_file is not None:
         st.error(f"❌ Отсутствуют столбцы: {', '.join(missing)}")
         st.stop()
 
-    # ---------- Парсинг даты и времени ----------
-    date_series = df['date'].astype(str)
-    time_series = df['time'].astype(str)
-    time_is_empty = time_series.str.replace(r'[\s\.]', '', regex=True).str.len().sum() == 0
+    # ---------- Парсинг даты и времени (с явным приведением к строке) ----------
+    # Гарантируем, что date и time - строки, даже если в CSV они числовые
+    date_series = df['date'].astype(str).str.strip()
+    time_series = df['time'].astype(str).str.strip()
+    # Если время целиком состоит из пробелов/точек, считаем его пустым
+    time_is_empty = time_series.str.replace(r'[\s\.]', '', regex=True).eq('').all()
 
     if not time_is_empty:
-        df['datetime'] = pd.to_datetime(date_series + ' ' + time_series, errors='coerce')
+        datetime_str = date_series + ' ' + time_series
+        df['datetime'] = pd.to_datetime(datetime_str, errors='coerce')
     else:
         df['datetime'] = pd.to_datetime(date_series, errors='coerce')
 
@@ -160,7 +163,7 @@ if uploaded_file is not None:
                 if not time_is_empty:
                     parsed_times = pd.to_datetime(time_series, format=time_fmt, errors='coerce').dt.time
                     df['datetime'] = pd.to_datetime(
-                        parsed_dates.dt.strftime('%Y-%m-%d') + ' ' + parsed_times.astype(str),
+                        parsed_dates.dt.strftime('%Y-%m-%d') + ' ' + pd.Series(parsed_times).astype(str),
                         errors='coerce'
                     )
                 else:
@@ -299,6 +302,7 @@ if uploaded_file is not None:
         # ---------- Прогноз на полных данных ----------
         full_ts = pd.concat([train, test])
 
+        # Безопасное создание будущих дат
         if freq == 'MS':
             start_date = full_ts.index[-1] + pd.DateOffset(months=1)
         elif freq == 'W-MON':
@@ -335,7 +339,7 @@ if uploaded_file is not None:
             resid_std = np.std(np.array(test) - np.array(selected['pred_test']))
             lower, upper = forecast - 1.96*resid_std, forecast + 1.96*resid_std
 
-        # ---------- График ----------
+        # ---------- Интерактивный график ----------
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=train.index, y=train.values, name='Train', line=dict(color='blue')))
         fig.add_trace(go.Scatter(x=test.index, y=test.values, name='Test', line=dict(color='orange')))
@@ -345,13 +349,15 @@ if uploaded_file is not None:
                                  fill='toself', fillcolor='rgba(0,100,80,0.2)',
                                  line=dict(color='rgba(255,255,255,0)'),
                                  name='95% доверит. интервал'))
-        # ИСПРАВЛЕНИЕ: передаём строку вместо Timestamp
-        fig.add_vline(x=test.index[0].strftime('%Y-%m-%d %H:%M:%S'), line_dash="dash", line_color="red",
+        # Вертикальная линия – дата как строка ISO
+        vline_date = pd.Timestamp(test.index[0]).strftime('%Y-%m-%d %H:%M:%S')
+        fig.add_vline(x=vline_date, line_dash="dash", line_color="red",
                       annotation_text="Начало прогноза")
         fig.update_layout(title=f"Прогноз ({selected_model})",
                           xaxis_title="Дата", yaxis_title="Сумма (total)",
                           hovermode='x unified')
-        st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'displayModeBar': True})
+        st.plotly_chart(fig, use_container_width=True,
+                        config={'scrollZoom': True, 'displayModeBar': True})
 
         # ---------- PDF ----------
         if st.button("📄 Скачать PDF-отчёт"):
