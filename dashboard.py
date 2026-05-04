@@ -7,18 +7,14 @@ import os
 import warnings
 warnings.filterwarnings('ignore')
 
-# Matplotlib
 import matplotlib
 if 'DISPLAY' not in os.environ and 'MPLBACKEND' not in os.environ:
     matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# Plotly
 import plotly.graph_objects as go
-
-# Statsmodels для Holt-Winters
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from sklearn.metrics import mean_squared_error
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
 def mape(y_true, y_pred):
     y_true, y_pred = np.array(y_true), np.array(y_pred)
@@ -28,13 +24,13 @@ def mape(y_true, y_pred):
     return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask]))
 
 st.set_page_config(layout="wide")
-st.title("Прогнозирование (Holt-Winters)")
+st.title("Прогнозирование (Holt-Winters) с очисткой данных")
 
 enc_choice = st.selectbox("Кодировка", ['auto','utf-8','cp1251','latin1','iso-8859-1','cp1252'], index=0)
 uploaded = st.file_uploader("CSV-файл", type="csv")
 
 if uploaded:
-    # Кодировка
+    # ---------- Кодировка ----------
     if enc_choice == 'auto':
         raw = uploaded.read()
         try:
@@ -52,12 +48,13 @@ if uploaded:
         st.error(f"Ошибка чтения: {e}")
         st.stop()
 
+    # ---------- Проверка столбцов ----------
     needed = ['date','time','category','product','quantity','price','total']
     if not all(col in df.columns for col in needed):
-        st.error(f"Нет всех обязательных колонок: {', '.join(needed)}")
+        st.error(f"Нет обязательных столбцов: {', '.join(needed)}")
         st.stop()
 
-    # Преобразование даты и времени
+    # ---------- Преобразование даты и времени ----------
     df['date'] = df['date'].astype(str).str.strip()
     df['time'] = df['time'].astype(str).str.strip()
     time_empty = df['time'].str.replace(r'[\s\.]','',regex=True).eq('').all()
@@ -71,31 +68,59 @@ if uploaded:
     for c in ['quantity','price','total']:
         df[c] = pd.to_numeric(df[c], errors='coerce')
     df.dropna(subset=['quantity','price','total'], inplace=True)
+
+    # ---------- Очистка данных ----------
+    # 1. Удаление дубликатов (по всем колонкам)
+    df.drop_duplicates(inplace=True)
+
+    # 2. Удаление выбросов в total (метод межквартильного размаха)
+    Q1 = df['total'].quantile(0.25)
+    Q3 = df['total'].quantile(0.75)
+    IQR = Q3 - Q1
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+    # Удаляем строки, где total лежит вне границ
+    df = df[(df['total'] >= lower_bound) & (df['total'] <= upper_bound)]
+
+    # 3. Удаление отрицательных и нулевых total (опционально)
+    df = df[df['total'] > 0]
+
     df.sort_values('datetime', inplace=True)
 
     if df.empty:
         st.error("Нет данных после очистки")
         st.stop()
 
-    st.success(f"Данных: {len(df)} строк")
+    st.success(f"Данных после очистки: {len(df)} строк")
 
+    # ---------- Настройки прогноза ----------
     freq_map = {'час': 'h', 'день': 'D', 'неделя': 'W-MON', 'месяц': 'MS'}
     freq_label = st.selectbox("Периодичность", list(freq_map.keys()))
     freq = freq_map[freq_label]
-    horizon = st.slider("Горизонт прогноза", 1, 50, 10)
+    horizon = st.slider("Горизонт прогноза", 1, 52, 8)  # для недель до 52
 
     if st.button("🚀 Создать прогноз"):
-        with st.spinner("Строим прогноз..."):
-            # Агрегация
-            ts = df.set_index('datetime').resample(freq)['total'].sum().dropna()
+        with st.spinner("Обработка и прогноз..."):
+            # ---------- Агрегация и работа с пропусками ----------
+            ts = df.set_index('datetime').resample(freq)['total'].sum()
+            # Обеспечиваем полный временной ряд (все периоды)
+            ts = ts.asfreq(freq)
+            # Заполняем пропуски интерполяцией
+            ts = ts.interpolate(method='linear')
+            # Если остались NaN в начале или конце - заполняем ближайшим
+            ts.fillna(method='bfill', inplace=True)
+            ts.fillna(method='ffill', inplace=True)
+            # Удаляем любые оставшиеся NaN (хотя их быть не должно)
+            ts.dropna(inplace=True)
+
             if len(ts) < horizon + 5:
-                st.error("Слишком мало данных")
+                st.error(f"Недостаточно данных после агрегации (осталось {len(ts)} точек). Уменьшите горизонт или измените периодичность.")
                 st.stop()
 
             train = ts.iloc[:-horizon]
             test = ts.iloc[-horizon:]
 
-            # Параметры сезонности
+            # ---------- Параметры сезонности ----------
             if freq == 'h':
                 sp = 24
             elif freq == 'D':
@@ -107,27 +132,30 @@ if uploaded:
             if sp >= len(train):
                 sp = max(2, len(train)//2)
 
-            # Holt-Winters
-            model = ExponentialSmoothing(
-                train,
-                trend='add',
-                seasonal='add',
-                seasonal_periods=sp,
-                initialization_method='estimated'
-            ).fit()
+            # ---------- Обучение Holt-Winters ----------
+            try:
+                model = ExponentialSmoothing(
+                    train,
+                    trend='add',
+                    seasonal='add',
+                    seasonal_periods=sp,
+                    initialization_method='estimated'
+                ).fit()
+                test_pred = model.forecast(horizon)
+                rmse_val = np.sqrt(mean_squared_error(test, test_pred))
+                mape_val = mape(test, test_pred) * 100
+            except Exception as e:
+                st.error(f"Ошибка обучения Holt-Winters: {e}")
+                st.stop()
 
-            test_pred = model.forecast(horizon)
-            rmse_val = np.sqrt(mean_squared_error(test, test_pred))
-            mape_val = mape(test, test_pred) * 100
-
-            st.subheader("Метрики")
+            st.subheader("Метрики модели")
             col1, col2 = st.columns(2)
             col1.metric("RMSE", f"{rmse_val:.2f}")
             col2.metric("MAPE", f"{mape_val:.1f}%")
 
-            # Прогноз на будущее
+            # ---------- Прогноз на будущее ----------
             full = pd.concat([train, test])
-            # следующая дата
+            # Следующая дата после конца ряда
             if freq == 'MS':
                 start = full.index[-1] + pd.DateOffset(months=1)
             elif freq == 'W-MON':
@@ -140,6 +168,7 @@ if uploaded:
                 start = full.index[-1] + pd.Timedelta(1, unit=freq)
             future = pd.date_range(start=start, periods=horizon, freq=freq)
 
+            # Переобучение на полном ряде
             full_model = ExponentialSmoothing(
                 full,
                 trend='add',
@@ -149,12 +178,12 @@ if uploaded:
             ).fit()
             forecast = full_model.forecast(horizon)
 
-            # Доверительный интервал упрощённо
+            # Доверительный интервал
             std_res = np.std(train - test_pred)
             lower = forecast - 1.96 * std_res
             upper = forecast + 1.96 * std_res
 
-            # График
+            # ---------- График ----------
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=train.index, y=train.values,
                                      name='Train', line=dict(color='blue')))
@@ -169,7 +198,6 @@ if uploaded:
                 line=dict(color='rgba(255,255,255,0)'),
                 name='95% CI'))
 
-            # Вертикальная линия
             split_date = test.index[0]
             fig.add_shape(type='line', x0=split_date, x1=split_date,
                           y0=0, y1=1, yref='paper',
@@ -178,8 +206,8 @@ if uploaded:
                                text='Прогноз', showarrow=False,
                                xanchor='left', textangle=-90)
 
-            fig.update_layout(title='Прогноз (Holt-Winters)',
-                              xaxis_title='Дата', yaxis_title='Сумма',
+            fig.update_layout(title='Прогноз (Holt-Winters с очисткой)',
+                              xaxis_title='Дата', yaxis_title='Сумма (total)',
                               hovermode='x unified')
             st.plotly_chart(fig, use_container_width=True,
                             config={'scrollZoom': True, 'displayModeBar': True})
