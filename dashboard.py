@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from io import BytesIO
 import base64
-import os, warnings, time
+import os, warnings, gc, time
 warnings.filterwarnings('ignore')
 
 import matplotlib
@@ -33,42 +33,7 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from fpdf import FPDF
 
 # ---------------------------- Оптимизации памяти ----------------------------
-pd.options.mode.copy_on_write = True   # предотвращает лишнее копирование DataFrame
-
-# ---------------------------- Праздники РФ ---------------------------------
-RUSSIAN_HOLIDAYS = {
-    '2020-01-01','2020-01-02','2020-01-03','2020-01-04','2020-01-05',
-    '2020-01-06','2020-01-07','2020-01-08','2020-01-09','2020-01-10',
-    '2020-01-11','2020-01-12','2020-02-23','2020-02-24','2020-03-08',
-    '2020-05-01','2020-05-09','2020-06-12','2020-11-04',
-    '2021-01-01','2021-01-02','2021-01-03','2021-01-04','2021-01-05',
-    '2021-01-06','2021-01-07','2021-01-08','2021-01-09','2021-01-10',
-    '2021-01-11','2021-01-12','2021-02-23','2021-03-08',
-    '2021-05-01','2021-05-09','2021-06-12','2021-11-04',
-    '2022-01-01','2022-01-02','2022-01-03','2022-01-04','2022-01-05',
-    '2022-01-06','2022-01-07','2022-01-08','2022-01-09','2022-01-10',
-    '2022-01-11','2022-01-12','2022-02-23','2022-03-08',
-    '2022-05-01','2022-05-09','2022-06-12','2022-11-04',
-    '2023-01-01','2023-01-02','2023-01-03','2023-01-04','2023-01-05',
-    '2023-01-06','2023-01-07','2023-01-08','2023-01-09','2023-01-10',
-    '2023-01-11','2023-01-12','2023-02-23','2023-03-08',
-    '2023-05-01','2023-05-09','2023-06-12','2023-11-04',
-    '2024-01-01','2024-01-02','2024-01-03','2024-01-04','2024-01-05',
-    '2024-01-06','2024-01-07','2024-01-08','2024-01-09','2024-01-10',
-    '2024-01-11','2024-01-12','2024-02-23','2024-03-08',
-    '2024-05-01','2024-05-09','2024-06-12','2024-11-04',
-    '2025-01-01','2025-01-02','2025-01-03','2025-01-04','2025-01-05',
-    '2025-01-06','2025-01-07','2025-01-08','2025-01-09','2025-01-10',
-    '2025-01-11','2025-01-12','2025-02-23','2025-03-08',
-    '2025-05-01','2025-05-09','2025-06-12','2025-11-04',
-    '2026-01-01','2026-01-02','2026-01-03','2026-01-04','2026-01-05',
-    '2026-01-06','2026-01-07','2026-01-08','2026-01-09','2026-01-10',
-    '2026-01-11','2026-01-12','2026-02-23','2026-03-08',
-    '2026-05-01','2026-05-09','2026-06-12','2026-11-04',
-}
-
-def is_holiday(dt):
-    return dt.strftime('%Y-%m-%d') in RUSSIAN_HOLIDAYS
+pd.options.mode.copy_on_write = True
 
 # ---------------------------- Функции метрик ----------------------------
 def mape(y_true, y_pred):
@@ -79,16 +44,16 @@ def mape(y_true, y_pred):
     return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask]))
 
 # ---------------------------- Создание признаков (облегчённое) ----------------------------
-def create_lag_features(series, lags, freq_str, holiday_series=None):
+def create_lag_features(series, lags, freq_str):
     df_feat = pd.DataFrame(index=series.index)
     # Лаги
     for lag in range(1, lags+1):
         df_feat[f'lag_{lag}'] = series.shift(lag)
-    # Только два скользящих окна
+    # Только два скользящих окна для скорости
     for w in [3, 7]:
         if w < len(series):
-            df_feat[f'roll_mean_{w}'] = series.rolling(w).mean()
-            df_feat[f'roll_std_{w}'] = series.rolling(w).std()
+            df_feat[f'roll_mean_{w}'] = series.rolling(window=w).mean()
+            df_feat[f'roll_std_{w}'] = series.rolling(window=w).std()
     # Временные метки
     dt_index = series.index
     if freq_str == 'h':
@@ -109,8 +74,6 @@ def create_lag_features(series, lags, freq_str, holiday_series=None):
         df_feat['month'] = dt_index.month
         df_feat['quarter'] = dt_index.quarter
         df_feat['year'] = dt_index.year
-    if holiday_series is not None:
-        df_feat['holiday'] = holiday_series.loc[df_feat.index].fillna(0).astype(np.int8)
     df_feat.dropna(inplace=True)
     return df_feat, series[df_feat.index]
 
@@ -139,18 +102,14 @@ def recursive_forecast(model, history_series, forecast_dates, lags, freq_str):
             feat['quarter'] = dt.quarter; feat['year'] = dt.year
         elif freq_str == 'MS':
             feat['month'] = dt.month; feat['quarter'] = dt.quarter; feat['year'] = dt.year
-        # Праздник для будущей даты
-        feat['holiday'] = 1 if is_holiday(dt) else 0
         X = pd.DataFrame([feat])
         pred = model.predict(X)[0]
         preds.append(pred)
-        # Эффективное добавление новой точки без перестроения всего объекта
-        new_point = pd.Series({dt: pred})
-        hist = pd.concat([hist, new_point])
+        hist = pd.concat([hist, pd.Series({dt: pred})])
     return np.array(preds)
 
-def train_ml_model(model, train_series, test_index, lags, freq_str, holiday_series=None):
-    X_train, y_train = create_lag_features(train_series, lags, freq_str, holiday_series)
+def train_ml_model(model, train_series, test_index, lags, freq_str):
+    X_train, y_train = create_lag_features(train_series, lags, freq_str)
     if len(X_train) == 0:
         return None, None
     model.fit(X_train, y_train)
@@ -168,7 +127,7 @@ if uploaded is not None:
         st.error("❌ Размер файла превышает 150 МБ. Загрузите файл меньшего размера.")
         st.stop()
 
-    # Выбор кодировки
+    # Кодировка
     enc_choice = st.selectbox("Кодировка файла", ['auto','utf-8','cp1251','latin1','iso-8859-1','cp1252'])
     if enc_choice == 'auto':
         raw = uploaded.read()
@@ -181,7 +140,7 @@ if uploaded is not None:
     else:
         enc = enc_choice
 
-    # Быстрая загрузка CSV только с нужными столбцами и типами
+    # Быстрая загрузка только нужных столбцов
     try:
         dtype_dict = {
             'date': str, 'time': str, 'category': str, 'product': str,
@@ -198,7 +157,7 @@ if uploaded is not None:
         st.error(f"❌ Ошибка чтения файла: {e}")
         st.stop()
 
-    # Проверка наличия всех колонок
+    # Проверка столбцов
     required = ['date','time','category','product','quantity','price','total']
     if not all(col in df.columns for col in required):
         st.error(f"❌ Отсутствуют обязательные столбцы: {', '.join(set(required)-set(df.columns))}")
@@ -226,7 +185,6 @@ if uploaded is not None:
     else:
         df['datetime'] = pd.to_datetime(df['date'], errors='coerce')
     df.dropna(subset=['datetime'], inplace=True)
-    # Числовые колонки уже в нужном типе, но на всякий случай
     for c in ['quantity','price','total']:
         df[c] = pd.to_numeric(df[c], errors='coerce')
     df.dropna(subset=['quantity','price','total'], inplace=True)
@@ -270,45 +228,55 @@ if uploaded is not None:
         st.warning("⚠️ Нет данных для выбранной комбинации.")
         st.stop()
 
+    # Быстрый режим (без ARIMA)
+    fast_mode = st.checkbox("Быстрый режим (без ARIMA)", value=True)
+
     # Кнопка запуска прогноза
     if st.button("🚀 Построить прогноз"):
         start_time = time.time()
-        with st.spinner("Идёт агрегация и обучение моделей... Это может занять до минуты."):
-            # Агрегация временного ряда
-            ts = df_filtered.set_index('datetime').resample(freq)['total'].sum()
-            del df_filtered  # освобождаем память
-            ts = ts.asfreq(freq)
-            ts.interpolate(method='linear', inplace=True)
-            ts.bfill(inplace=True)
-            ts.ffill(inplace=True)
-            ts.dropna(inplace=True)
+        progress_bar = st.progress(0)
+        status_text = st.empty()
 
-            if len(ts) < horizon + 5:
-                st.error(f"❌ Недостаточно данных для прогноза (доступно {len(ts)} точек).")
+        try:
+            # Шаг 1: Агрегация (кэшируем)
+            @st.cache_data(show_spinner=False)
+            def aggregate_data(df_json, freq, horizon):
+                df_local = pd.read_json(df_json)
+                ts = df_local.set_index('datetime').resample(freq)['total'].sum()
+                ts = ts.asfreq(freq)
+                ts.interpolate(method='linear', inplace=True)
+                ts.bfill(inplace=True)
+                ts.ffill(inplace=True)
+                ts.dropna(inplace=True)
+                if len(ts) < horizon + 5:
+                    return None, None, None
+                train = ts.iloc[:-horizon]
+                test = ts.iloc[-horizon:]
+                return train, test, ts
+
+            status_text.text("Агрегация данных...")
+            progress_bar.progress(15)
+
+            # Сериализуем отфильтрованный DataFrame для кэша
+            df_json = df_filtered.to_json()
+            train, test, ts = aggregate_data(df_json, freq, horizon)
+
+            if train is None:
+                st.error("❌ Недостаточно данных для прогноза. Уменьшите горизонт или измените периодичность.")
                 st.stop()
 
-            train = ts.iloc[:-horizon]
-            test = ts.iloc[-horizon:]
-
-            # Параметры сезонности и лагов
+            # Параметры сезонности и лагов (уменьшены для скорости)
             if freq == 'h':
                 sp, lags = 24, min(24, len(train)//2)
-            elif freq == 'D':
-                sp, lags = 7, min(14, len(train)//2)
-            elif freq == 'W-MON':
-                sp, lags = 52, min(12, len(train)//2)
-            else:  # MS
-                sp, lags = 12, min(6, len(train)//2)
+            else:
+                sp = {'D': 7, 'W-MON': 52, 'MS': 12}[freq]
+                lags = min(6, len(train)//2)   # всего 6 лагов для не‑часовых данных
 
-            # Признак праздника для ML
-            holiday_series = pd.Series(
-                [1 if is_holiday(d) else 0 for d in train.index],
-                index=train.index, dtype=np.int8
-            )
+            status_text.text("Обучение моделей...")
+            progress_bar.progress(30)
 
             results = {}
-
-            # Holt-Winters (быстрая базовая модель)
+            # Holt-Winters
             try:
                 hw = ExponentialSmoothing(train, trend='add', seasonal='add',
                                           seasonal_periods=sp,
@@ -323,15 +291,12 @@ if uploaded is not None:
             except Exception as e:
                 st.warning(f"Holt-Winters не обучена: {e}")
 
-            # ARIMA с жесткими ограничениями по времени
-            if HAS_ARIMA:
+            # ARIMA только если не быстрый режим
+            if HAS_ARIMA and not fast_mode:
                 try:
-                    arima = pm.auto_arima(
-                        train, seasonal=True, m=sp,
-                        suppress_warnings=True, error_action='ignore',
-                        stepwise=True, trace=False,
-                        maxiter=10, time_limit=20
-                    )
+                    arima = pm.auto_arima(train, seasonal=True, m=sp,
+                                          maxiter=10, time_limit=20,
+                                          suppress_warnings=True, error_action='ignore')
                     pred = arima.predict(n_periods=horizon)
                     results['ARIMA'] = {
                         'rmse': np.sqrt(mean_squared_error(test, pred)),
@@ -342,9 +307,12 @@ if uploaded is not None:
                 except Exception as e:
                     st.warning(f"ARIMA не обучена: {e}")
 
-            # Random Forest (оптимизированные параметры)
-            rf = RandomForestRegressor(n_estimators=80, max_depth=8, random_state=42, n_jobs=-1)
-            pred = train_ml_model(rf, train, test.index, lags, freq, holiday_series)
+            # Параметры быстрых деревьев
+            n_trees, max_d, lr = 50, 5, 0.15
+
+            # Random Forest
+            rf = RandomForestRegressor(n_estimators=n_trees, max_depth=max_d, random_state=42, n_jobs=-1)
+            pred = train_ml_model(rf, train, test.index, lags, freq)
             if pred is not None:
                 results['Random Forest'] = {
                     'rmse': np.sqrt(mean_squared_error(test, pred)),
@@ -355,9 +323,9 @@ if uploaded is not None:
 
             # XGBoost
             if HAS_XGB:
-                xgb = XGBRegressor(n_estimators=80, max_depth=6, learning_rate=0.1,
+                xgb = XGBRegressor(n_estimators=n_trees, max_depth=max_d, learning_rate=lr,
                                    random_state=42, verbosity=0, n_jobs=-1)
-                pred = train_ml_model(xgb, train, test.index, lags, freq, holiday_series)
+                pred = train_ml_model(xgb, train, test.index, lags, freq)
                 if pred is not None:
                     results['XGBoost'] = {
                         'rmse': np.sqrt(mean_squared_error(test, pred)),
@@ -368,9 +336,9 @@ if uploaded is not None:
 
             # LightGBM
             if HAS_LGB:
-                lgbm = LGBMRegressor(n_estimators=80, max_depth=6, learning_rate=0.1,
+                lgbm = LGBMRegressor(n_estimators=n_trees, max_depth=max_d, learning_rate=lr,
                                      random_state=42, verbose=-1, n_jobs=-1)
-                pred = train_ml_model(lgbm, train, test.index, lags, freq, holiday_series)
+                pred = train_ml_model(lgbm, train, test.index, lags, freq)
                 if pred is not None:
                     results['LightGBM'] = {
                         'rmse': np.sqrt(mean_squared_error(test, pred)),
@@ -386,34 +354,29 @@ if uploaded is not None:
             best_name = min(results, key=lambda k: results[k]['rmse'])
             best = results[best_name]
 
-            st.subheader(f"🏆 Лучшая модель: {best_name}")
-            col1, col2 = st.columns(2)
-            col1.metric("RMSE", f"{best['rmse']:.2f}")
-            col2.metric("MAPE", f"{best['mape']:.2f}%")
+            status_text.text("Построение прогноза...")
+            progress_bar.progress(70)
 
-            # Обучение лучшей модели на полном ряде
+            # Обучение лучшей модели на всём ряде
             full_ts = pd.concat([train, test])
             if best_name in ['Holt-Winters', 'ARIMA']:
                 if best_name == 'Holt-Winters':
-                    full_model = ExponentialSmoothing(
-                        full_ts, trend='add', seasonal='add',
-                        seasonal_periods=sp, initialization_method='estimated'
-                    ).fit()
+                    full_model = ExponentialSmoothing(full_ts, trend='add', seasonal='add',
+                                                      seasonal_periods=sp,
+                                                      initialization_method='estimated').fit()
                 else:
-                    full_model = pm.auto_arima(
-                        full_ts, seasonal=True, m=sp,
-                        suppress_warnings=True, error_action='ignore',
-                        stepwise=True, trace=False, maxiter=10, time_limit=20
-                    )
+                    full_model = pm.auto_arima(full_ts, seasonal=True, m=sp,
+                                               maxiter=10, time_limit=20,
+                                               suppress_warnings=True, error_action='ignore')
             else:
-                X_full, y_full = create_lag_features(full_ts, lags, freq, holiday_series)
+                X_full, y_full = create_lag_features(full_ts, lags, freq)
                 if best_name == 'Random Forest':
-                    full_model = RandomForestRegressor(n_estimators=80, max_depth=8, random_state=42, n_jobs=-1)
+                    full_model = RandomForestRegressor(n_estimators=n_trees, max_depth=max_d, random_state=42, n_jobs=-1)
                 elif best_name == 'XGBoost':
-                    full_model = XGBRegressor(n_estimators=80, max_depth=6, learning_rate=0.1,
+                    full_model = XGBRegressor(n_estimators=n_trees, max_depth=max_d, learning_rate=lr,
                                               random_state=42, verbosity=0, n_jobs=-1)
                 else:
-                    full_model = LGBMRegressor(n_estimators=80, max_depth=6, learning_rate=0.1,
+                    full_model = LGBMRegressor(n_estimators=n_trees, max_depth=max_d, learning_rate=lr,
                                                random_state=42, verbose=-1, n_jobs=-1)
                 full_model.fit(X_full, y_full)
 
@@ -443,9 +406,20 @@ if uploaded is not None:
             upper = forecast + 1.645 * std_res
 
             elapsed = time.time() - start_time
-            st.caption(f"Прогноз построен за {elapsed:.1f} сек.")
+            progress_bar.progress(90)
+            status_text.text(f"Прогноз построен за {elapsed:.1f} сек.")
+            time.sleep(0.5)
+            progress_bar.progress(100)
+            progress_bar.empty()
+            status_text.empty()
 
-            # --------------------------- Графики ---------------------------
+            # --------------------------- Результаты ---------------------------
+            st.subheader(f"🏆 Лучшая модель: {best_name}")
+            col1, col2 = st.columns(2)
+            col1.metric("RMSE", f"{best['rmse']:.2f}")
+            col2.metric("MAPE", f"{best['mape']:.2f}%")
+
+            # График прогноза
             fig_main = go.Figure()
             fig_main.add_trace(go.Scatter(x=train.index, y=train.values,
                                           name='Train', line=dict(color='blue')))
@@ -484,7 +458,7 @@ if uploaded is not None:
             fig_comp.update_layout(showlegend=False)
             st.plotly_chart(fig_comp, use_container_width=True)
 
-            # Таблица прогнозных значений
+            # Таблица прогноза
             st.subheader("📋 Прогнозные значения")
             forecast_table = pd.DataFrame({
                 'Дата': future,
@@ -494,7 +468,7 @@ if uploaded is not None:
             })
             st.dataframe(forecast_table, use_container_width=True)
 
-            # --------------------------- PDF-отчёт ---------------------------
+            # PDF-отчёт
             if st.button("📄 Скачать PDF-отчёт"):
                 pdf = FPDF()
                 pdf.add_page()
@@ -542,6 +516,9 @@ if uploaded is not None:
                 href = f'<a href="data:application/pdf;base64,{b64}" download="forecast_report.pdf">Скачать PDF</a>'
                 st.markdown(href, unsafe_allow_html=True)
 
-        # Очистка временных переменных (дополнительная гарантия)
-        del ts, train, test, holiday_series, results
-        gc.collect()
+        except Exception as e:
+            st.error(f"❌ Ошибка при построении прогноза: {e}")
+        finally:
+            # Явно освобождаем память
+            del df_filtered, train, test, results
+            gc.collect()
