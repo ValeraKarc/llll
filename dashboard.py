@@ -69,21 +69,17 @@ if uploaded:
         df[c] = pd.to_numeric(df[c], errors='coerce')
     df.dropna(subset=['quantity','price','total'], inplace=True)
 
-    # ---------- Очистка данных ----------
-    # 1. Удаление дубликатов (по всем колонкам)
+    # ---------- Очистка данных (выбросы, дубликаты) ----------
     df.drop_duplicates(inplace=True)
 
-    # 2. Удаление выбросов в total (метод межквартильного размаха)
     Q1 = df['total'].quantile(0.25)
     Q3 = df['total'].quantile(0.75)
     IQR = Q3 - Q1
     lower_bound = Q1 - 1.5 * IQR
     upper_bound = Q3 + 1.5 * IQR
-    # Удаляем строки, где total лежит вне границ
     df = df[(df['total'] >= lower_bound) & (df['total'] <= upper_bound)]
 
-    # 3. Удаление отрицательных и нулевых total (опционально)
-    df = df[df['total'] > 0]
+    df = df[df['total'] > 0]   # убираем нулевые/отрицательные
 
     df.sort_values('datetime', inplace=True)
 
@@ -97,24 +93,20 @@ if uploaded:
     freq_map = {'час': 'h', 'день': 'D', 'неделя': 'W-MON', 'месяц': 'MS'}
     freq_label = st.selectbox("Периодичность", list(freq_map.keys()))
     freq = freq_map[freq_label]
-    horizon = st.slider("Горизонт прогноза", 1, 52, 8)  # для недель до 52
+    horizon = st.slider("Горизонт прогноза", 1, 52, 8)
 
     if st.button("🚀 Создать прогноз"):
         with st.spinner("Обработка и прогноз..."):
-            # ---------- Агрегация и работа с пропусками ----------
+            # ---------- Агрегация и заполнение пропусков ----------
             ts = df.set_index('datetime').resample(freq)['total'].sum()
-            # Обеспечиваем полный временной ряд (все периоды)
-            ts = ts.asfreq(freq)
-            # Заполняем пропуски интерполяцией
-            ts = ts.interpolate(method='linear')
-            # Если остались NaN в начале или конце - заполняем ближайшим
-            ts.fillna(method='bfill', inplace=True)
-            ts.fillna(method='ffill', inplace=True)
-            # Удаляем любые оставшиеся NaN (хотя их быть не должно)
+            ts = ts.asfreq(freq)                        # полный календарь
+            ts.interpolate(method='linear', inplace=True)  # линейная интерполяция пропусков
+            ts.bfill(inplace=True)                      # заполняем начало
+            ts.ffill(inplace=True)                      # заполняем конец
             ts.dropna(inplace=True)
 
             if len(ts) < horizon + 5:
-                st.error(f"Недостаточно данных после агрегации (осталось {len(ts)} точек). Уменьшите горизонт или измените периодичность.")
+                st.error(f"Недостаточно данных после агрегации (осталось {len(ts)} точек).")
                 st.stop()
 
             train = ts.iloc[:-horizon]
@@ -155,7 +147,6 @@ if uploaded:
 
             # ---------- Прогноз на будущее ----------
             full = pd.concat([train, test])
-            # Следующая дата после конца ряда
             if freq == 'MS':
                 start = full.index[-1] + pd.DateOffset(months=1)
             elif freq == 'W-MON':
@@ -168,7 +159,6 @@ if uploaded:
                 start = full.index[-1] + pd.Timedelta(1, unit=freq)
             future = pd.date_range(start=start, periods=horizon, freq=freq)
 
-            # Переобучение на полном ряде
             full_model = ExponentialSmoothing(
                 full,
                 trend='add',
@@ -178,7 +168,6 @@ if uploaded:
             ).fit()
             forecast = full_model.forecast(horizon)
 
-            # Доверительный интервал
             std_res = np.std(train - test_pred)
             lower = forecast - 1.96 * std_res
             upper = forecast + 1.96 * std_res
