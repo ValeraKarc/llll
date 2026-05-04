@@ -3,9 +3,6 @@ pandas
 numpy
 plotly
 scikit-learn
-xgboost
-lightgbm
-pmdarima
 statsmodels
 fpdf
 matplotlib
