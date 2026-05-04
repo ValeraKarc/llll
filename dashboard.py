@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from io import BytesIO
 import base64
 import os, warnings, gc, time
@@ -18,25 +17,40 @@ from sklearn.metrics import mean_squared_error
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from fpdf import FPDF
 
-# ---------------------------- Функции ----------------------------
+# ---------- Вспомогательные функции ----------
 def mape(y_true, y_pred):
-    y_true, y_pred = np.array(y_true), np.array(y_pred)
+    y_true, y_pred = np.array(y_true, dtype=np.float64), np.array(y_pred, dtype=np.float64)
     mask = y_true != 0
     if np.sum(mask) == 0:
         return np.inf
     return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask]))
 
-# ---------------------------- Интерфейс ----------------------------
-st.set_page_config(layout="wide")
-st.title("📈 Прогнозирование продаж (оптимизированный ансамбль)")
+# ---------- Интерфейс ----------
+st.set_page_config(page_title="Прогноз продаж", layout="wide")
+st.title("📈 Прогнозирование продаж")
+st.markdown("Загрузите CSV-файл с данными о продажах и получите прогноз на выбранный период.")
 
-uploaded = st.file_uploader("Загрузите CSV-файл (до 150 МБ)", type="csv")
+# Боковая панель с подсказками
+with st.sidebar:
+    st.header("💡 Подсказки")
+    st.markdown("- **Обязательные столбцы:** date, time, category, product, quantity, price, total")
+    st.markdown("- **Формат даты:** любой (дд.мм.гггг, гггг-мм-дд и т.д.)")
+    st.markdown("- **Кодировка:** автоопределение или выберите вручную (обычно utf-8 или cp1251)")
+    st.markdown("- **Периодичность:** выберите, с каким интервалом агрегировать продажи")
+    st.markdown("- **Горизонт:** на сколько периодов вперёд строить прогноз")
+    st.markdown("- **Быстрый режим:** только Holt‑Winters (работает мгновенно)")
+    st.markdown("- **Расширенный режим:** добавляется Random Forest (точнее, но дольше)")
+
+uploaded = st.file_uploader("📂 Загрузите CSV-файл (до 150 МБ)", type=["csv"])
+
 if uploaded is not None:
+    # Проверка размера
     if uploaded.size > 150 * 1024 * 1024:
-        st.error("❌ Размер файла превышает 150 МБ.")
+        st.error("❌ Размер файла превышает 150 МБ. Пожалуйста, загрузите файл меньшего размера.")
         st.stop()
 
-    enc_choice = st.selectbox("Кодировка", ['auto','utf-8','cp1251'])
+    # Выбор кодировки
+    enc_choice = st.selectbox("📝 Кодировка файла", ['auto','utf-8','cp1251','latin1','iso-8859-1','cp1252'])
     if enc_choice == 'auto':
         raw = uploaded.read()
         try:
@@ -48,209 +62,272 @@ if uploaded is not None:
     else:
         enc = enc_choice
 
+    # Загрузка данных (только нужные столбцы, экономичные типы)
     try:
-        dtypes = {'date': str, 'time': str, 'category': str, 'product': str,
-                  'quantity': np.float32, 'price': np.float32, 'total': np.float32}
-        df = pd.read_csv(uploaded, encoding=enc,
-                         usecols=['date','time','category','product','quantity','price','total'],
-                         dtype=dtypes, on_bad_lines='skip')
+        dtypes = {
+            'date': str, 'time': str, 'category': str, 'product': str,
+            'quantity': np.float32, 'price': np.float32, 'total': np.float32
+        }
+        df = pd.read_csv(
+            uploaded,
+            encoding=enc,
+            usecols=['date','time','category','product','quantity','price','total'],
+            dtype=dtypes,
+            on_bad_lines='skip'
+        )
     except Exception as e:
-        st.error(f"Ошибка чтения: {e}")
+        st.error(f"❌ Ошибка чтения файла: {e}")
         st.stop()
 
+    # Проверка наличия всех обязательных столбцов
     required = ['date','time','category','product','quantity','price','total']
-    if not all(col in df.columns for col in required):
-        st.error(f"❌ Отсутствуют столбцы: {', '.join(set(required)-set(df.columns))}")
+    missing = [col for col in required if col not in df.columns]
+    if missing:
+        st.error(f"❌ Отсутствуют обязательные столбцы: {', '.join(missing)}")
         st.stop()
 
-    # проверка инъекций
+    # Защита от инъекций
     def has_injection(val):
         s = str(val).strip()
         return s.startswith(('=', '+', '-', '@'))
-    if any(df[col].astype(str).apply(has_injection).any() for col in df.columns if df[col].dtype == object):
-        st.error("⚠️ Обнаружены опасные конструкции. Загрузка остановлена.")
+    injection_detected = False
+    for col in df.columns:
+        if df[col].dtype == object and df[col].apply(has_injection).any():
+            injection_detected = True
+            break
+    if injection_detected:
+        st.error("⚠️ Обнаружены потенциально опасные конструкции (ячейки начинаются с '=', '+', '-', '@'). Загрузка остановлена.")
         st.stop()
 
-    # очистка
+    # Очистка данных
     df['date'] = df['date'].astype(str).str.strip()
     df['time'] = df['time'].astype(str).str.strip()
-    time_empty = df['time'].str.replace(r'[\s\.]','',regex=True).eq('').all()
-    if not time_empty:
+    time_is_empty = df['time'].str.replace(r'[\s\.]', '', regex=True).eq('').all()
+    if not time_is_empty:
         df['datetime'] = pd.to_datetime(df['date'] + ' ' + df['time'], errors='coerce')
     else:
         df['datetime'] = pd.to_datetime(df['date'], errors='coerce')
     df.dropna(subset=['datetime'], inplace=True)
-    for c in ['quantity','price','total']:
-        df[c] = pd.to_numeric(df[c], errors='coerce')
+    for col in ['quantity','price','total']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
     df.dropna(subset=['quantity','price','total'], inplace=True)
     df.drop_duplicates(inplace=True)
     df = df[df['total'] > 0]
     df.sort_values('datetime', inplace=True)
+
     if df.empty:
-        st.error("Нет данных после очистки.")
+        st.error("❌ После очистки не осталось данных. Проверьте файл.")
         st.stop()
-    st.success(f"✅ Загружено {len(df)} строк")
-    st.dataframe(df.head(10))
 
-    freq_map = {'час': 'h', 'день': 'D', 'неделя': 'W-MON', 'месяц': 'MS'}
-    freq_label = st.selectbox("Периодичность", list(freq_map.keys()))
-    freq = freq_map[freq_label]
+    st.success(f"✅ Данные загружены: {len(df)} записей")
+    with st.expander("🔍 Просмотреть первые 10 строк"):
+        st.dataframe(df.head(10))
 
-    cats = ['Все'] + sorted(df['category'].unique().tolist())
-    selected_category = st.selectbox("Категория", cats)
-    if selected_category != 'Все':
-        prods = ['Все'] + sorted(df[df['category'] == selected_category]['product'].unique().tolist())
-    else:
-        prods = ['Все']
-    selected_product = st.selectbox("Товар", prods)
+    # Настройки прогноза
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        freq_map = {'час': 'h', 'день': 'D', 'неделя': 'W-MON', 'месяц': 'MS'}
+        freq_label = st.selectbox("📅 Периодичность", list(freq_map.keys()), index=3)  # по умолчанию месяц
+        freq = freq_map[freq_label]
+    with col2:
+        categories = ['Все'] + sorted(df['category'].unique().tolist())
+        selected_category = st.selectbox("🏷️ Категория", categories)
+    with col3:
+        if selected_category != 'Все':
+            products = ['Все'] + sorted(df[df['category'] == selected_category]['product'].unique().tolist())
+        else:
+            products = ['Все']
+        selected_product = st.selectbox("📦 Товар", products)
 
-    horizon = st.slider("Горизонт прогноза", 1, 52, 8)
+    horizon = st.slider("🔮 Горизонт прогноза (периодов)", min_value=1, max_value=52, value=5)
 
-    # фильтрация
+    # Режим модели
+    use_ml = st.checkbox("🔄 Расширенный режим (добавить Random Forest)", value=False,
+                         help="Может улучшить точность на длинных рядах, но требует больше времени.")
+
+    # Фильтрация данных
     if selected_category == 'Все':
         df_filtered = df.copy()
     else:
         df_filtered = df[df['category'] == selected_category]
         if selected_product != 'Все':
             df_filtered = df_filtered[df_filtered['product'] == selected_product]
+
     if df_filtered.empty:
-        st.warning("Нет данных для выбранной комбинации.")
+        st.warning("⚠️ Для выбранной комбинации категории/товара нет данных.")
         st.stop()
 
-    # включение ML
-    use_ml = st.checkbox("Расширенный режим (добавить Random Forest)", value=False)
-
+    # Основная кнопка
     if st.button("🚀 Построить прогноз"):
         start_time = time.time()
-        progress = st.progress(0)
-        status = st.empty()
-        try:
-            # ---------- Агрегация (кэшируем) ----------
-            @st.cache_data(show_spinner=False)
-            def aggregate(df_json, freq, horizon):
-                df_local = pd.read_json(df_json)
-                ts = df_local.set_index('datetime').resample(freq)['total'].sum()
-                ts = ts.asfreq(freq)
-                ts.interpolate(method='linear', inplace=True)
-                ts.bfill(inplace=True)
-                ts.ffill(inplace=True)
-                ts.dropna(inplace=True)
-                if len(ts) < horizon + 5:
-                    return None, None, None
-                train = ts.iloc[:-horizon]
-                test = ts.iloc[-horizon:]
-                return train, test, ts
+        progress_bar = st.progress(0)
+        status_text = st.empty()
 
-            status.text("Агрегация данных...")
-            progress.progress(10)
-            df_json = df_filtered.to_json()
-            del df_filtered
+        try:
+            # ----- Агрегация -----
+            status_text.text("⏳ Агрегация данных...")
+            progress_bar.progress(10)
+
+            # Преобразуем float32 -> float64 для resample (statsmodels требует float64)
+            ts = df_filtered.set_index('datetime')['total'].astype(np.float64).resample(freq).sum()
+            del df_filtered          # освобождаем память
             gc.collect()
-            train, test, ts = aggregate(df_json, freq, horizon)
-            if train is None:
-                st.error("Недостаточно данных после агрегации.")
+
+            ts = ts.asfreq(freq)
+            ts.interpolate(method='linear', inplace=True)
+            ts.bfill(inplace=True)
+            ts.ffill(inplace=True)
+            ts.dropna(inplace=True)
+
+            if len(ts) < horizon + 5:
+                st.error(f"❌ Недостаточно данных для прогноза (всего {len(ts)} точек). Уменьшите горизонт или измените периодичность.")
                 st.stop()
 
-            # ---------- Параметры ----------
-            if freq == 'h': sp = 24
-            elif freq == 'D': sp = 7
-            elif freq == 'W-MON': sp = 52
-            else: sp = 12
-            if sp >= len(train): sp = max(2, len(train)//2)
+            train = ts.iloc[:-horizon]
+            test = ts.iloc[-horizon:]
+
+            # ----- Параметры сезонности -----
+            if freq == 'h':
+                sp = 24
+            elif freq == 'D':
+                sp = 7
+            elif freq == 'W-MON':
+                sp = 52
+            else:  # 'MS'
+                sp = 12
+            if sp >= len(train):
+                sp = max(2, len(train)//2)
 
             results = {}
 
-            # Holt-Winters
-            status.text("Holt-Winters...")
-            progress.progress(25)
+            # ----- Holt-Winters -----
+            status_text.text("🧠 Обучение Holt-Winters...")
+            progress_bar.progress(30)
             try:
-                hw = ExponentialSmoothing(train, trend='add', seasonal='add',
-                                          seasonal_periods=sp,
-                                          initialization_method='estimated').fit()
+                hw = ExponentialSmoothing(
+                    train,
+                    trend='add',
+                    seasonal='add',
+                    seasonal_periods=sp,
+                    initialization_method='estimated'
+                ).fit()
                 pred_hw = hw.forecast(horizon)
+                rmse_hw = np.sqrt(mean_squared_error(test, pred_hw))
+                mape_hw = mape(test, pred_hw) * 100
                 results['Holt-Winters'] = {
-                    'rmse': np.sqrt(mean_squared_error(test, pred_hw)),
-                    'mape': mape(test, pred_hw)*100,
-                    'pred_test': pred_hw, 'model': hw
+                    'rmse': rmse_hw,
+                    'mape': mape_hw,
+                    'pred_test': pred_hw,
+                    'model': hw
                 }
             except Exception as e:
-                st.warning(f"Holt-Winters: {e}")
+                st.warning(f"⚠️ Holt-Winters не удалось обучить: {e}")
 
-            # Random Forest (только если use_ml)
+            # ----- Random Forest (лёгкий) -----
             if use_ml:
-                status.text("Random Forest (лёгкий)...")
-                progress.progress(50)
-                lags = min(6, len(train)//2)
+                status_text.text("🌲 Обучение Random Forest...")
+                progress_bar.progress(50)
+
+                # Используем всего 3 лага
+                lags = min(3, len(train)//2)
                 X_train = pd.DataFrame(index=train.index)
                 for lag in range(1, lags+1):
                     X_train[f'lag_{lag}'] = train.shift(lag)
                 y_train = train.copy()
-                X_train.dropna(inplace=True)
-                y_train = y_train.loc[X_train.index]
-                if len(X_train) > 0:
-                    rf = RandomForestRegressor(n_estimators=30, max_depth=4,
-                                               random_state=42, n_jobs=-1)
+                # Удаляем строки с NaN, возникшие из-за лагов
+                valid_idx = ~X_train.isna().any(axis=1)
+                X_train = X_train.loc[valid_idx]
+                y_train = y_train.loc[valid_idx]
+
+                if len(X_train) > 5:
+                    rf = RandomForestRegressor(
+                        n_estimators=30,
+                        max_depth=5,
+                        random_state=42,
+                        n_jobs=-1  # использовать все ядра
+                    )
                     rf.fit(X_train, y_train)
-                    # рекурсивный прогноз
-                    pred_rf = []
-                    hist = y_train.iloc[-lags:].tolist()
+
+                    # Рекурсивный прогноз на тестовый период
+                    test_pred = []
+                    # Берём последние lags значений из тренировочной части
+                    history = y_train.iloc[-lags:].values.tolist()
                     for _ in range(len(test)):
-                        feat = {f'lag_{i+1}': hist[-i-1] for i in range(lags)}
-                        p = rf.predict(pd.DataFrame([feat]))[0]
-                        pred_rf.append(p)
-                        hist.append(p)
-                    pred_rf = np.array(pred_rf)
-                    rmse_rf = np.sqrt(mean_squared_error(test, pred_rf))
-                    mape_rf = mape(test, pred_rf)*100
+                        feat = {f'lag_{i+1}': history[-i-1] for i in range(lags)}
+                        X_row = pd.DataFrame([feat])
+                        pred = rf.predict(X_row)[0]
+                        test_pred.append(pred)
+                        history.append(pred)
+                    test_pred = np.array(test_pred)
+                    rmse_rf = np.sqrt(mean_squared_error(test, test_pred))
+                    mape_rf = mape(test, test_pred) * 100
                     results['Random Forest'] = {
-                        'rmse': rmse_rf, 'mape': mape_rf,
-                        'pred_test': pred_rf, 'model': rf
+                        'rmse': rmse_rf,
+                        'mape': mape_rf,
+                        'pred_test': test_pred,
+                        'model': rf
                     }
+                else:
+                    st.warning("⚠️ Недостаточно данных для обучения Random Forest после создания лагов.")
 
             if not results:
-                st.error("Модели не обучились.")
+                st.error("❌ Ни одна модель не обучилась. Проверьте данные.")
                 st.stop()
 
+            # ----- Выбор лучшей модели -----
             best_name = min(results, key=lambda k: results[k]['rmse'])
             best = results[best_name]
 
-            status.text("Финальный прогноз...")
-            progress.progress(80)
+            status_text.text(f"🏆 Лучшая модель: {best_name}")
+            progress_bar.progress(60)
 
+            # ----- Финальное обучение на ВСЕХ данных -----
             full_ts = pd.concat([train, test])
-            # Обучение лучшей модели на всех данных
+
             if best_name == 'Holt-Winters':
-                full_model = ExponentialSmoothing(full_ts, trend='add', seasonal='add',
-                                                  seasonal_periods=sp,
-                                                  initialization_method='estimated').fit()
+                full_model = ExponentialSmoothing(
+                    full_ts,
+                    trend='add',
+                    seasonal='add',
+                    seasonal_periods=sp,
+                    initialization_method='estimated'
+                ).fit()
                 forecast = full_model.forecast(horizon)
             else:  # Random Forest
-                lags = min(6, len(full_ts)//2)
+                lags = min(3, len(full_ts)//2)
                 X_full = pd.DataFrame(index=full_ts.index)
                 for lag in range(1, lags+1):
                     X_full[f'lag_{lag}'] = full_ts.shift(lag)
                 y_full = full_ts.copy()
-                X_full.dropna(inplace=True)
-                y_full = y_full.loc[X_full.index]
-                full_model = RandomForestRegressor(n_estimators=30, max_depth=4,
-                                                   random_state=42, n_jobs=-1)
+                valid_idx = ~X_full.isna().any(axis=1)
+                X_full = X_full.loc[valid_idx]
+                y_full = y_full.loc[valid_idx]
+
+                full_model = RandomForestRegressor(
+                    n_estimators=30,
+                    max_depth=5,
+                    random_state=42,
+                    n_jobs=-1
+                )
                 full_model.fit(X_full, y_full)
-                # рекурсивный прогноз будущего
-                hist = y_full.iloc[-lags:].tolist()
+
+                # Рекурсивный прогноз на будущее
+                history = y_full.iloc[-lags:].values.tolist()
                 forecast = []
                 for _ in range(horizon):
-                    feat = {f'lag_{i+1}': hist[-i-1] for i in range(lags)}
-                    p = full_model.predict(pd.DataFrame([feat]))[0]
-                    forecast.append(p)
-                    hist.append(p)
+                    feat = {f'lag_{i+1}': history[-i-1] for i in range(lags)}
+                    X_row = pd.DataFrame([feat])
+                    pred = full_model.predict(X_row)[0]
+                    forecast.append(pred)
+                    history.append(pred)
                 forecast = np.array(forecast)
 
-            # Доверительный интервал
+            # ----- Доверительный интервал (90%) -----
             std_res = np.std(np.array(test) - np.array(best['pred_test']))
             lower = forecast - 1.645 * std_res
             upper = forecast + 1.645 * std_res
 
-            # Будущие даты
+            # ----- Построение будущих дат -----
             if freq == 'MS':
                 start = full_ts.index[-1] + pd.DateOffset(months=1)
             elif freq == 'W-MON':
@@ -264,76 +341,87 @@ if uploaded is not None:
             future = pd.date_range(start=start, periods=horizon, freq=freq)
 
             elapsed = time.time() - start_time
-            progress.progress(100)
-            status.text(f"Готово за {elapsed:.1f} сек.")
+            progress_bar.progress(90)
+            status_text.text(f"✅ Готово за {elapsed:.1f} сек.")
             time.sleep(0.5)
-            progress.empty()
-            status.empty()
+            progress_bar.progress(100)
+            progress_bar.empty()
+            status_text.empty()
 
-            # ---------- Вывод ----------
-            st.subheader(f"🏆 Лучшая модель: {best_name}")
+            # ----- ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ -----
+            st.subheader(f"🏆 Лучшая модель: **{best_name}**")
             col1, col2 = st.columns(2)
-            col1.metric("RMSE", f"{best['rmse']:.2f}")
-            col2.metric("MAPE", f"{best['mape']:.2f}%")
+            with col1:
+                st.metric("RMSE", f"{best['rmse']:,.2f}")
+            with col2:
+                st.metric("MAPE", f"{best['mape']:.2f}%")
 
-            # График
+            # Интерактивный график
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=train.index, y=train.values, name='Train', line=dict(color='blue')))
-            fig.add_trace(go.Scatter(x=test.index, y=test.values, name='Test', line=dict(color='orange')))
-            fig.add_trace(go.Scatter(x=future, y=forecast, name='Forecast', line=dict(color='green')))
+            fig.add_trace(go.Scatter(x=train.index, y=train.values,
+                                     name='Исторические данные', line=dict(color='#1f77b4')))
+            fig.add_trace(go.Scatter(x=test.index, y=test.values,
+                                     name='Тестовые данные', line=dict(color='#ff7f0e')))
+            fig.add_trace(go.Scatter(x=future, y=forecast,
+                                     name='Прогноз', line=dict(color='#2ca02c', dash='solid')))
             fig.add_trace(go.Scatter(
                 x=np.concatenate([future, future[::-1]]),
                 y=np.concatenate([upper, lower[::-1]]),
-                fill='toself', fillcolor='rgba(0,100,80,0.15)',
-                line=dict(color='rgba(255,255,255,0)'), name='90% CI'))
+                fill='toself', fillcolor='rgba(44,160,44,0.2)',
+                line=dict(color='rgba(255,255,255,0)'),
+                name='90% доверительный интервал'
+            ))
+            # Разделяющая линия
             split_date = test.index[0]
-            fig.add_shape(type='line', x0=split_date, x1=split_date,
-                          y0=0, y1=1, yref='paper', line=dict(color='red', dash='dash'))
-            fig.add_annotation(x=split_date, y=1, yref='paper', text='Прогноз',
-                               showarrow=False, xanchor='left', textangle=-90)
-            fig.update_layout(title=f"Прогноз ({best_name})",
-                              xaxis_title='Дата', yaxis_title='Сумма (total)',
-                              hovermode='x unified')
-            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'displayModeBar': True})
+            fig.add_vline(x=split_date, line_width=1, line_dash="dash", line_color="red",
+                          annotation_text="Начало прогноза", annotation_position="top left")
+            fig.update_layout(
+                title=f"Прогноз продаж ({best_name})",
+                xaxis_title="Дата",
+                yaxis_title="Сумма продаж",
+                hovermode='x unified',
+                template='plotly_white'
+            )
+            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
-            # Таблица
-            st.subheader("📋 Прогнозные значения")
-            st.dataframe(pd.DataFrame({
-                'Дата': future,
-                'Прогноз': forecast,
-                'Нижняя граница (90%)': lower,
-                'Верхняя граница (90%)': upper
-            }), use_container_width=True)
+            # Таблица прогнозных значений
+            st.subheader("📊 Таблица прогнозных значений")
+            forecast_table = pd.DataFrame({
+                'Дата': future.strftime('%Y-%m-%d'),
+                'Прогноз': forecast.round(2),
+                'Нижняя граница (90%)': lower.round(2),
+                'Верхняя граница (90%)': upper.round(2)
+            })
+            st.dataframe(forecast_table, use_container_width=True)
 
-            # PDF (опционально)
-            if st.button("📄 Скачать PDF"):
+            # PDF-отчёт
+            if st.button("📄 Скачать отчёт (PDF)"):
                 pdf = FPDF()
                 pdf.add_page()
                 pdf.set_font("Arial", size=12)
-                pdf.cell(200,10,"Отчёт о прогнозировании",ln=1,align='C')
+                pdf.cell(200, 10, "Отчёт о прогнозировании", ln=1, align='C')
                 pdf.ln(10)
                 pdf.set_font("Arial", size=10)
-                pdf.cell(200,10,f"Модель: {best_name}",ln=1)
-                pdf.cell(200,10,f"Категория: {selected_category}, Товар: {selected_product}",ln=1)
-                pdf.cell(200,10,f"Периодичность: {freq_label}",ln=1)
-                pdf.cell(200,10,f"Горизонт: {horizon} периодов",ln=1)
-                pdf.cell(200,10,f"RMSE: {best['rmse']:.2f}",ln=1)
-                pdf.cell(200,10,f"MAPE: {best['mape']:.2f}%",ln=1)
+                pdf.cell(200, 10, f"Модель: {best_name}", ln=1)
+                pdf.cell(200, 10, f"Категория: {selected_category}, Товар: {selected_product}", ln=1)
+                pdf.cell(200, 10, f"Периодичность: {freq_label} | Горизонт: {horizon} периодов", ln=1)
+                pdf.cell(200, 10, f"RMSE: {best['rmse']:,.2f} | MAPE: {best['mape']:.2f}%", ln=1)
                 pdf.ln(5)
-                pdf.set_font("Arial",'B',9)
-                pdf.cell(50,8,"Дата",1)
-                pdf.cell(40,8,"Прогноз",1)
-                pdf.cell(40,8,"Нижняя",1)
-                pdf.cell(40,8,"Верхняя",1)
+                # Таблица
+                pdf.set_font("Arial", 'B', 9)
+                pdf.cell(50, 8, "Дата", 1)
+                pdf.cell(40, 8, "Прогноз", 1)
+                pdf.cell(40, 8, "Нижняя гр.", 1)
+                pdf.cell(40, 8, "Верхняя гр.", 1)
                 pdf.ln()
                 pdf.set_font("Arial", size=9)
                 for i, dt in enumerate(future):
-                    pdf.cell(50,8,dt.strftime("%Y-%m-%d"),1)
-                    pdf.cell(40,8,f"{forecast[i]:.2f}",1)
-                    pdf.cell(40,8,f"{lower[i]:.2f}",1)
-                    pdf.cell(40,8,f"{upper[i]:.2f}",1)
+                    pdf.cell(50, 8, dt.strftime('%Y-%m-%d'), 1)
+                    pdf.cell(40, 8, f"{forecast[i]:,.2f}", 1)
+                    pdf.cell(40, 8, f"{lower[i]:,.2f}", 1)
+                    pdf.cell(40, 8, f"{upper[i]:,.2f}", 1)
                     pdf.ln()
-                # график в PDF
+                # График в PDF
                 fig_mpl, ax = plt.subplots(figsize=(8,4))
                 ax.plot(train.index, train.values, label='Train')
                 ax.plot(test.index, test.values, label='Test')
@@ -349,10 +437,12 @@ if uploaded is not None:
                 buf.close()
                 pdf_bytes = pdf.output(dest='S').encode('latin-1')
                 b64 = base64.b64encode(pdf_bytes).decode()
-                st.markdown(f'<a href="data:application/pdf;base64,{b64}" download="forecast.pdf">Скачать PDF</a>', unsafe_allow_html=True)
+                href = f'<a href="data:application/pdf;base64,{b64}" download="forecast_report.pdf">Скачать PDF</a>'
+                st.markdown(href, unsafe_allow_html=True)
 
         except Exception as e:
-            st.error(f"❌ Ошибка: {e}")
+            st.error(f"❌ Во время выполнения прогноза произошла ошибка: {e}")
         finally:
+            # Окончательная очистка памяти
             del train, test, ts
             gc.collect()
