@@ -16,6 +16,17 @@ import plotly.graph_objects as go
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
 
+try:
+    from xgboost import XGBRegressor
+    HAS_XGB = True
+except ImportError:
+    HAS_XGB = False
+try:
+    from lightgbm import LGBMRegressor
+    HAS_LGB = True
+except ImportError:
+    HAS_LGB = False
+
 # ------------------- Вспомогательные функции -------------------
 def mape(y_true, y_pred):
     y_true, y_pred = np.array(y_true), np.array(y_pred)
@@ -67,9 +78,17 @@ def recursive_forecast(model, history_series, forecast_dates, lags, freq_str):
         hist = pd.concat([hist, pd.Series({dt: pred})])
     return np.array(preds)
 
+def train_and_evaluate_ml(model, train_series, test_index, lags, freq_str):
+    X_train, y_train = create_lag_features(train_series, lags, freq_str)
+    if len(X_train) == 0:
+        return None, None
+    model.fit(X_train, y_train)
+    preds = recursive_forecast(model, train_series, test_index, lags, freq_str)
+    return preds
+
 # ------------------- Интерфейс приложения -------------------
 st.set_page_config(layout="wide")
-st.title("Прогнозирование (Random Forest) с очисткой данных")
+st.title("Прогнозирование (ансамбль моделей) с очисткой данных")
 
 enc_choice = st.selectbox("Кодировка", ['auto','utf-8','cp1251','latin1','iso-8859-1','cp1252'], index=0)
 uploaded = st.file_uploader("CSV-файл", type="csv")
@@ -140,11 +159,10 @@ if uploaded is not None:
     horizon = st.slider("Горизонт прогноза", 1, 52, 8)
 
     if st.button("🚀 Создать прогноз"):
-        with st.spinner("Обработка и прогноз..."):
+        with st.spinner("Обработка и обучение моделей..."):
             # Агрегация
             ts = df.set_index('datetime').resample(freq)['total'].sum()
             ts = ts.asfreq(freq)
-            # Заполнение пропусков (без method=)
             ts.interpolate(method='linear', inplace=True)
             ts.bfill(inplace=True)
             ts.ffill(inplace=True)
@@ -160,25 +178,59 @@ if uploaded is not None:
             # Параметры лагов
             lags = min(12, len(train)//2)
 
+            results = {}
+
             # Random Forest
             rf = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-            X_train, y_train = create_lag_features(train, lags, freq)
-            rf.fit(X_train, y_train)
+            pred_rf = train_and_evaluate_ml(rf, train, test.index, lags, freq)
+            if pred_rf is not None:
+                rmse_rf = np.sqrt(mean_squared_error(test, pred_rf))
+                mape_rf = mape(test, pred_rf) * 100
+                results['Random Forest'] = {'rmse': rmse_rf, 'mape': mape_rf, 'pred_test': pred_rf, 'model': rf}
 
-            test_pred = recursive_forecast(rf, train, test.index, lags, freq)
-            rmse_val = np.sqrt(mean_squared_error(test, test_pred))
-            mape_val = mape(test, test_pred) * 100
+            # XGBoost
+            if HAS_XGB:
+                xgb = XGBRegressor(n_estimators=100, random_state=42, verbosity=0, n_jobs=-1)
+                pred_xgb = train_and_evaluate_ml(xgb, train, test.index, lags, freq)
+                if pred_xgb is not None:
+                    rmse_xgb = np.sqrt(mean_squared_error(test, pred_xgb))
+                    mape_xgb = mape(test, pred_xgb) * 100
+                    results['XGBoost'] = {'rmse': rmse_xgb, 'mape': mape_xgb, 'pred_test': pred_xgb, 'model': xgb}
 
-            st.subheader("Метрики Random Forest")
+            # LightGBM
+            if HAS_LGB:
+                lgbm = LGBMRegressor(n_estimators=100, random_state=42, verbose=-1, n_jobs=-1)
+                pred_lgbm = train_and_evaluate_ml(lgbm, train, test.index, lags, freq)
+                if pred_lgbm is not None:
+                    rmse_lgbm = np.sqrt(mean_squared_error(test, pred_lgbm))
+                    mape_lgbm = mape(test, pred_lgbm) * 100
+                    results['LightGBM'] = {'rmse': rmse_lgbm, 'mape': mape_lgbm, 'pred_test': pred_lgbm, 'model': lgbm}
+
+            if not results:
+                st.error("Ни одна модель не обучилась")
+                st.stop()
+
+            # Выбор лучшей модели
+            best_name = min(results, key=lambda k: results[k]['rmse'])
+            best = results[best_name]
+
+            st.subheader(f"🏆 Лучшая модель: {best_name}")
             col1, col2 = st.columns(2)
-            col1.metric("RMSE", f"{rmse_val:.2f}")
-            col2.metric("MAPE", f"{mape_val:.1f}%")
+            col1.metric("RMSE", f"{best['rmse']:.2f}")
+            col2.metric("MAPE", f"{best['mape']:.1f}%")
 
             # Прогноз на полном ряде
             full = pd.concat([train, test])
+            best_model = best['model']
+            # Обучаем лучшую модель на всех данных
             X_full, y_full = create_lag_features(full, lags, freq)
-            rf_full = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-            rf_full.fit(X_full, y_full)
+            if best_name in ['Random Forest']:
+                model_full = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+            elif best_name == 'XGBoost':
+                model_full = XGBRegressor(n_estimators=100, random_state=42, verbosity=0, n_jobs=-1)
+            else:  # LightGBM
+                model_full = LGBMRegressor(n_estimators=100, random_state=42, verbose=-1, n_jobs=-1)
+            model_full.fit(X_full, y_full)
 
             # Будущие даты
             if freq == 'MS':
@@ -193,10 +245,10 @@ if uploaded is not None:
                 start = full.index[-1] + pd.Timedelta(1, unit=freq)
             future = pd.date_range(start=start, periods=horizon, freq=freq)
 
-            forecast = recursive_forecast(rf_full, full, future, lags, freq)
+            forecast = recursive_forecast(model_full, full, future, lags, freq)
 
             # Доверительный интервал
-            std_res = np.std(np.array(test) - np.array(test_pred))
+            std_res = np.std(np.array(test) - np.array(best['pred_test']))
             lower = forecast - 1.96 * std_res
             upper = forecast + 1.96 * std_res
 
@@ -223,13 +275,13 @@ if uploaded is not None:
                                text='Прогноз', showarrow=False,
                                xanchor='left', textangle=-90)
 
-            fig.update_layout(title='Прогноз (Random Forest)',
+            fig.update_layout(title=f'Прогноз ({best_name})',
                               xaxis_title='Дата', yaxis_title='Сумма (total)',
                               hovermode='x unified')
             st.plotly_chart(fig, use_container_width=True,
                             config={'scrollZoom': True, 'displayModeBar': True})
 
-            # PDF-отчёт (опционально)
+            # PDF-отчёт
             if st.button("📄 Скачать PDF"):
                 from fpdf import FPDF
                 pdf = FPDF()
@@ -238,11 +290,11 @@ if uploaded is not None:
                 pdf.cell(200,10,"Отчёт о прогнозировании",ln=1,align='C')
                 pdf.ln(10)
                 pdf.set_font("Arial", size=10)
-                pdf.cell(200,10,f"Модель: Random Forest",ln=1)
+                pdf.cell(200,10,f"Модель: {best_name}",ln=1)
                 pdf.cell(200,10,f"Периодичность: {freq_label}",ln=1)
                 pdf.cell(200,10,f"Горизонт: {horizon} периодов",ln=1)
-                pdf.cell(200,10,f"RMSE: {rmse_val:.2f}",ln=1)
-                pdf.cell(200,10,f"MAPE: {mape_val:.2f}%",ln=1)
+                pdf.cell(200,10,f"RMSE: {best['rmse']:.2f}",ln=1)
+                pdf.cell(200,10,f"MAPE: {best['mape']:.2f}%",ln=1)
                 pdf.ln(5)
                 pdf.set_font("Arial",'B',9)
                 pdf.cell(50,8,"Дата",1)
