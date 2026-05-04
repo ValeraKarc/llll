@@ -1,7 +1,7 @@
 import streamlit as st, pandas as pd, numpy as np, plotly.graph_objects as go
 from io import BytesIO
 import base64
-import matplotlib, matplotlib.pyplot as plt, time, gc, os, urllib.request
+import matplotlib, matplotlib.pyplot as plt, time, gc, os
 matplotlib.use('Agg')
 from sklearn.metrics import mean_squared_error
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
@@ -13,15 +13,15 @@ def mape(y_true, y_pred):
     if np.sum(mask) == 0: return np.inf
     return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask]))
 
-# Загрузка шрифтов DejaVu для PDF (кешируется)
-@st.cache_resource
+# Получение путей к шрифтам DejaVu (должны лежать рядом с .py файлом)
 def get_dejavu_fonts():
     fonts = {}
-    url_base = "https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/ttf/"
-    for fname in ["DejaVuSansCondensed.ttf", "DejaVuSansCondensed-Bold.ttf"]:
-        if not os.path.exists(fname):
-            urllib.request.urlretrieve(url_base + fname, fname)
-        fonts[fname] = fname
+    base = os.path.dirname(__file__)
+    regular = os.path.join(base, 'DejaVuSansCondensed.ttf')
+    bold = os.path.join(base, 'DejaVuSansCondensed-Bold.ttf')
+    if os.path.exists(regular) and os.path.exists(bold):
+        fonts['regular'] = regular
+        fonts['bold'] = bold
     return fonts
 
 st.set_page_config(page_title="Интеллектуальная модель прогнозирования продаж", layout="wide")
@@ -115,8 +115,7 @@ if uploaded:
                 'train': train, 'test': test, 'future': future,
                 'forecast': forecast, 'lower': lower, 'upper': upper,
                 'rmse': rmse_val, 'mape': mape_val, 'freq_label': freq_label,
-                'horizon': horizon, 'selected_cat': selected_cat, 'selected_prod': selected_prod,
-                'freq': freq
+                'horizon': horizon, 'selected_cat': selected_cat, 'selected_prod': selected_prod
             }
 
     # Отображение результатов (если они есть в сессии)
@@ -151,53 +150,58 @@ if uploaded:
             'Верхняя граница': res['upper'].round(2)
         }), use_container_width=True)
 
-        # Кнопка PDF отдельно от прогноза
-        if st.button("📄 Скачать отчёт (PDF)"):
-            res = st.session_state['forecast_results']
-            fonts = get_dejavu_fonts()
-            pdf = FPDF()
-            pdf.add_page()
-            pdf.add_font('DejaVu', '', fonts['DejaVuSansCondensed.ttf'], uni=True)
-            pdf.add_font('DejaVu', 'B', fonts['DejaVuSansCondensed-Bold.ttf'], uni=True)
-            pdf.set_font('DejaVu', '', 14)
-            pdf.cell(0, 10, 'Отчёт о прогнозировании', ln=1, align='C')
-            pdf.ln(10)
-            pdf.set_font('DejaVu', '', 12)
-            pdf.cell(0, 10, f'Модель: экспоненциальное сглаживание Хольта-Винтерса', ln=1)
-            pdf.cell(0, 10, f'Периодичность: {res["freq_label"]} | Горизонт: {res["horizon"]} периодов', ln=1)
-            pdf.cell(0, 10, f'Категория: {res["selected_cat"]} | Товар: {res["selected_prod"]}', ln=1)
-            pdf.cell(0, 10, f'RMSE: {res["rmse"]:,.2f} | MAPE: {res["mape"]:.2f}%', ln=1)
-            pdf.ln(10)
-
-            pdf.set_font('DejaVu', 'B', 10)
-            pdf.cell(50, 8, 'Дата', 1)
-            pdf.cell(40, 8, 'Прогноз', 1)
-            pdf.cell(40, 8, 'Нижняя граница', 1)
-            pdf.cell(40, 8, 'Верхняя граница', 1)
-            pdf.ln()
-            pdf.set_font('DejaVu', '', 10)
-            for i, dt in enumerate(res['future']):
-                pdf.cell(50, 8, dt.strftime('%Y-%m-%d'), 1)
-                pdf.cell(40, 8, f"{res['forecast'][i]:,.2f}", 1)
-                pdf.cell(40, 8, f"{res['lower'][i]:,.2f}", 1)
-                pdf.cell(40, 8, f"{res['upper'][i]:,.2f}", 1)
+        # Проверяем наличие шрифтов для PDF
+        fonts = get_dejavu_fonts()
+        if not fonts:
+            st.warning("Для скачивания PDF необходимы шрифты DejaVu. Скачайте файлы "
+                       "[DejaVuSansCondensed.ttf](https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/ttf/DejaVuSansCondensed.ttf) "
+                       "и [DejaVuSansCondensed-Bold.ttf](https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/ttf/DejaVuSansCondensed-Bold.ttf) "
+                       "и поместите их в папку с приложением.")
+        else:
+            if st.button("📄 Скачать отчёт (PDF)"):
+                res = st.session_state['forecast_results']
+                pdf = FPDF()
+                pdf.add_page()
+                pdf.add_font('DejaVu', '', fonts['regular'], uni=True)
+                pdf.add_font('DejaVu', 'B', fonts['bold'], uni=True)
+                pdf.set_font('DejaVu', '', 14)
+                pdf.cell(0, 10, 'Отчёт о прогнозировании', ln=1, align='C')
+                pdf.ln(10)
+                pdf.set_font('DejaVu', '', 12)
+                pdf.cell(0, 10, 'Модель: экспоненциальное сглаживание Хольта-Винтерса', ln=1)
+                pdf.cell(0, 10, f'Периодичность: {res["freq_label"]} | Горизонт: {res["horizon"]} периодов', ln=1)
+                pdf.cell(0, 10, f'Категория: {res["selected_cat"]} | Товар: {res["selected_prod"]}', ln=1)
+                pdf.cell(0, 10, f'RMSE: {res["rmse"]:,.2f} | MAPE: {res["mape"]:.2f}%', ln=1)
+                pdf.ln(10)
+                pdf.set_font('DejaVu', 'B', 10)
+                pdf.cell(50, 8, 'Дата', 1)
+                pdf.cell(40, 8, 'Прогноз', 1)
+                pdf.cell(40, 8, 'Нижняя граница', 1)
+                pdf.cell(40, 8, 'Верхняя граница', 1)
                 pdf.ln()
+                pdf.set_font('DejaVu', '', 10)
+                for i, dt in enumerate(res['future']):
+                    pdf.cell(50, 8, dt.strftime('%Y-%m-%d'), 1)
+                    pdf.cell(40, 8, f"{res['forecast'][i]:,.2f}", 1)
+                    pdf.cell(40, 8, f"{res['lower'][i]:,.2f}", 1)
+                    pdf.cell(40, 8, f"{res['upper'][i]:,.2f}", 1)
+                    pdf.ln()
 
-            fig_mpl, ax = plt.subplots(figsize=(8, 4))
-            ax.plot(res['train'].index, res['train'].values, label='Обучающие')
-            ax.plot(res['test'].index, res['test'].values, label='Тестовые')
-            ax.plot(res['future'], res['forecast'], label='Прогноз')
-            ax.fill_between(res['future'], res['lower'], res['upper'], alpha=0.2)
-            ax.axvline(res['test'].index[0], color='red', linestyle='--')
-            ax.legend()
-            buf = BytesIO()
-            fig_mpl.savefig(buf, format='png', dpi=100)
-            buf.seek(0)
-            plt.close(fig_mpl)
-            pdf.image(buf, x=10, w=190)
-            buf.close()
+                fig_mpl, ax = plt.subplots(figsize=(8, 4))
+                ax.plot(res['train'].index, res['train'].values, label='Обучающие')
+                ax.plot(res['test'].index, res['test'].values, label='Тестовые')
+                ax.plot(res['future'], res['forecast'], label='Прогноз')
+                ax.fill_between(res['future'], res['lower'], res['upper'], alpha=0.2)
+                ax.axvline(res['test'].index[0], color='red', linestyle='--')
+                ax.legend()
+                buf = BytesIO()
+                fig_mpl.savefig(buf, format='png', dpi=100)
+                buf.seek(0)
+                plt.close(fig_mpl)
+                pdf.image(buf, x=10, w=190)
+                buf.close()
 
-            pdf_bytes = pdf.output()
-            b64 = base64.b64encode(pdf_bytes).decode()
-            href = f'<a href="data:application/pdf;base64,{b64}" download="forecast_report.pdf">Скачать PDF</a>'
-            st.markdown(href, unsafe_allow_html=True)
+                pdf_bytes = pdf.output()
+                b64 = base64.b64encode(pdf_bytes).decode()
+                href = f'<a href="data:application/pdf;base64,{b64}" download="forecast_report.pdf">Скачать PDF</a>'
+                st.markdown(href, unsafe_allow_html=True)
