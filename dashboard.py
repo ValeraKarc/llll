@@ -47,7 +47,19 @@ def mape(y_true, y_pred):
     if np.sum(mask) == 0: return np.inf
     return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask]))
 
-# ---------------------------- Обучение ML (RF и XGBoost) ----------------------------
+# ---------------------------- Очистка выбросов в ряду ----------------------------
+def remove_outliers(series):
+    """Удаляет выбросы по методу IQR, возвращает очищенный ряд с интерполированными пропусками."""
+    q1 = series.quantile(0.25)
+    q3 = series.quantile(0.75)
+    iqr = q3 - q1
+    lower = q1 - 1.5 * iqr
+    upper = q3 + 1.5 * iqr
+    clean = series.copy()
+    clean[(clean < lower) | (clean > upper)] = np.nan
+    return clean.interpolate().bfill().ffill()
+
+# ---------------------------- Обучение ML ----------------------------
 def train_ml_model(model, train_series, test_index, lags, freq, holiday_series=None):
     X = pd.DataFrame(index=train_series.index)
     for lag in range(1, lags+1):
@@ -60,7 +72,6 @@ def train_ml_model(model, train_series, test_index, lags, freq, holiday_series=N
     if len(X) < 5:
         return None, None
     model.fit(X, y)
-    # Рекурсивный прогноз на тестовый период
     test_pred = []
     hist = y.iloc[-lags:].tolist()
     for i, dt in enumerate(test_index):
@@ -160,12 +171,15 @@ if uploaded:
             if len(ts) < horizon + 5:
                 st.error(f"Мало данных ({len(ts)} точек)"); st.stop()
 
+            # === Очистка выбросов (новая!) ===
+            ts = remove_outliers(ts)
+
             train, test = ts.iloc[:-horizon], ts.iloc[-horizon:]
 
             # Параметры
             sp = {'h':24,'D':7,'W-MON':52,'MS':12}[freq]
             if sp >= len(train): sp = max(2, len(train)//2)
-            lags = 12 if freq == 'W-MON' else min(6, len(train)//2)
+            lags = 24 if freq == 'W-MON' else min(6, len(train)//2)  # для недель увеличены лаги
 
             holiday_series = None
             if freq in ('D','W-MON'):
@@ -194,7 +208,7 @@ if uploaded:
 
             # 2. Random Forest
             status.text("Random Forest..."); progress.progress(40)
-            rf = RandomForestRegressor(n_estimators=30, max_depth=5, random_state=42, n_jobs=-1)
+            rf = RandomForestRegressor(n_estimators=50, max_depth=7, random_state=42, n_jobs=-1)  # немного мощнее
             pred_rf, rf_model = train_ml_model(rf, train, test.index, lags, freq, holiday_series)
             if pred_rf is not None:
                 models['Random Forest'] = {
@@ -204,11 +218,11 @@ if uploaded:
                     'model': rf_model
                 }
 
-            # 3. XGBoost (если доступен)
+            # 3. XGBoost
             if HAS_XGB:
                 status.text("XGBoost..."); progress.progress(60)
-                xgb = XGBRegressor(n_estimators=30, max_depth=5, learning_rate=0.1,
-                                   random_state=42, verbosity=0, n_jobs=-1)
+                xgb = XGBRegressor(n_estimators=80, max_depth=6, learning_rate=0.05,
+                                   random_state=42, verbosity=0, n_jobs=-1)  # мощнее
                 pred_xgb, xgb_model = train_ml_model(xgb, train, test.index, lags, freq, holiday_series)
                 if pred_xgb is not None:
                     models['XGBoost'] = {
@@ -221,16 +235,30 @@ if uploaded:
             if not models:
                 st.error("Модели не обучились"); st.stop()
 
-            # Выбор лучшей модели по MAPE (меньше – лучше)
+            # Выбор по MAPE
             best_name = min(models, key=lambda k: models[k]['mape'])
             best = models[best_name]
 
-            status.text(f"Лучшая модель: {best_name} (MAPE={best['mape']:.2f}%)"); progress.progress(75)
+            status.text(f"Лучшая: {best_name} (MAPE={best['mape']:.2f}%)"); progress.progress(75)
 
-            # Финальное обучение на всех данных
+            # Финальное обучение на полном ряду (снова чистим выбросы, если нужно)
             full_ts = pd.concat([train, test])
-            from pandas.tseries.frequencies import to_offset
-            start_future = full_ts.index[-1] + to_offset(freq)
+
+            # Безопасное создание будущих дат
+            if freq == 'h':
+                start_future = full_ts.index[-1] + pd.Timedelta(hours=1)
+            elif freq == 'D':
+                start_future = full_ts.index[-1] + pd.Timedelta(days=1)
+            elif freq == 'W-MON':
+                start_future = full_ts.index[-1] + pd.Timedelta(weeks=1)
+            elif freq == 'MS':
+                # Месяц прибавляем аккуратно
+                if full_ts.index[-1].month == 12:
+                    start_future = pd.Timestamp(year=full_ts.index[-1].year+1, month=1, day=1)
+                else:
+                    start_future = pd.Timestamp(year=full_ts.index[-1].year, month=full_ts.index[-1].month+1, day=1)
+            else:
+                start_future = full_ts.index[-1] + pd.Timedelta(1, unit=freq)
             future = pd.date_range(start=start_future, periods=horizon, freq=freq)
 
             if best_name == 'Holt-Winters':
@@ -239,7 +267,6 @@ if uploaded:
                                                   initialization_method='estimated').fit()
                 forecast = full_model.forecast(horizon)
             else:
-                # Обучение ML на полном ряду
                 X_full = pd.DataFrame(index=full_ts.index)
                 for lag in range(1, lags+1):
                     X_full[f'lag_{lag}'] = full_ts.shift(lag)
@@ -251,18 +278,16 @@ if uploaded:
                 valid = ~X_full.isna().any(axis=1)
                 X_full, y_full = X_full.loc[valid], y_full.loc[valid]
 
-                # Создаём новую модель такого же типа
                 if best_name == 'Random Forest':
-                    full_model = RandomForestRegressor(n_estimators=30, max_depth=5, random_state=42, n_jobs=-1)
-                else:  # XGBoost
-                    full_model = XGBRegressor(n_estimators=30, max_depth=5, learning_rate=0.1,
+                    full_model = RandomForestRegressor(n_estimators=50, max_depth=7, random_state=42, n_jobs=-1)
+                else:
+                    full_model = XGBRegressor(n_estimators=80, max_depth=6, learning_rate=0.05,
                                               random_state=42, verbosity=0, n_jobs=-1)
                 full_model.fit(X_full, y_full)
 
                 future_hol = None
                 if freq in ('D','W-MON'):
                     future_hol = [1 if is_holiday(d) else 0 for d in future]
-
                 hist = y_full.iloc[-lags:].tolist()
                 forecast = []
                 for i in range(horizon):
@@ -277,7 +302,7 @@ if uploaded:
                     hist.append(pred)
                 forecast = np.array(forecast)
 
-            # 90% доверительный интервал
+            # Доверительный интервал
             std_res = np.std(np.array(test) - np.array(best['pred_test']))
             lower = forecast - 1.645*std_res
             upper = forecast + 1.645*std_res
@@ -285,15 +310,14 @@ if uploaded:
             progress.progress(95)
             status.empty(); progress.empty()
 
-            # ---------- Результаты ----------
+            # Вывод результатов
             st.subheader(f"🏆 Результаты (модель: {best_name})")
             col1, col2, col3 = st.columns(3)
             col1.metric("RMSE", f"{best['rmse']:,.2f}")
             col2.metric("MAPE", f"{best['mape']:.2f}%")
-            # Также покажем лучшую другую модель для сравнения
-            other_models = [m for m in models if m != best_name]
-            if other_models:
-                best_other = min(other_models, key=lambda x: models[x]['mape'])
+            other = [m for m in models if m != best_name]
+            if other:
+                best_other = min(other, key=lambda x: models[x]['mape'])
                 col3.metric(f"Альтернатива: {best_other}", f"MAPE {models[best_other]['mape']:.2f}%")
 
             # График
@@ -322,22 +346,18 @@ if uploaded:
                 'Верхняя граница (90%)': upper.round(2)
             }), use_container_width=True)
 
-            # Расширенная аналитика
             if show_advanced:
                 st.subheader("📊 Расширенная аналитика")
-                # Сравнение моделей
                 comp = pd.DataFrame([
                     {'Модель':n, 'RMSE':d['rmse'], 'MAPE':d['mape']} for n,d in models.items()
                 ]).sort_values('MAPE')
                 st.dataframe(comp, use_container_width=True)
-
                 fig_c = make_subplots(rows=1, cols=2, subplot_titles=('RMSE','MAPE'))
                 fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['RMSE'], name='RMSE'), 1, 1)
                 fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['MAPE'], name='MAPE'), 1, 2)
                 fig_c.update_layout(showlegend=False)
                 st.plotly_chart(fig_c, use_container_width=True)
 
-                # Декомпозиция
                 if len(train) >= 2*sp+10:
                     try:
                         dec = seasonal_decompose(train, model='additive', period=sp)
@@ -350,12 +370,11 @@ if uploaded:
                         st.plotly_chart(fd, use_container_width=True)
                     except: pass
 
-                # Остатки на тесте
                 resid = test.values - best['pred_test']
                 fig_r = go.Figure()
                 fig_r.add_trace(go.Scatter(x=test.index, y=resid, name='Остатки'))
                 fig_r.add_hline(y=0, line_dash='dash', line_color='red')
-                fig_r.update_layout(title='Остатки на тестовом периоде')
+                fig_r.update_layout(title='Остатки на тесте')
                 st.plotly_chart(fig_r, use_container_width=True)
 
             st.caption(f"⏱️ Прогноз построен за {time.time()-start:.1f} сек.")
