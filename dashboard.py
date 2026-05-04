@@ -1,7 +1,7 @@
 import streamlit as st, pandas as pd, numpy as np, plotly.graph_objects as go
 from io import BytesIO
 import base64
-import matplotlib, matplotlib.pyplot as plt, time, gc
+import matplotlib, matplotlib.pyplot as plt, time, gc, os, urllib.request
 matplotlib.use('Agg')
 from sklearn.metrics import mean_squared_error
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
@@ -12,6 +12,17 @@ def mape(y_true, y_pred):
     mask = y_true != 0
     if np.sum(mask) == 0: return np.inf
     return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask]))
+
+# Загрузка шрифтов DejaVu для PDF (кешируется)
+@st.cache_resource
+def get_dejavu_fonts():
+    fonts = {}
+    url_base = "https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/ttf/"
+    for fname in ["DejaVuSansCondensed.ttf", "DejaVuSansCondensed-Bold.ttf"]:
+        if not os.path.exists(fname):
+            urllib.request.urlretrieve(url_base + fname, fname)
+        fonts[fname] = fname
+    return fonts
 
 st.set_page_config(page_title="Интеллектуальная модель прогнозирования продаж", layout="wide")
 st.title("📈 Интеллектуальная модель прогнозирования продаж")
@@ -56,24 +67,22 @@ if uploaded:
     st.success(f"✅ {len(df)} строк")
     col1, col2, col3 = st.columns(3)
     freq_map = {'час': 'h', 'день': 'D', 'неделя': 'W-MON', 'месяц': 'MS'}
-    freq = freq_map[col1.selectbox("Периодичность", list(freq_map.keys()), index=3)]
+    freq_label = col1.selectbox("Периодичность", list(freq_map.keys()), index=3)
+    freq = freq_map[freq_label]
     cats = ['Все'] + sorted(df['category'].unique())
     selected_cat = col2.selectbox("Категория", cats)
     prods = ['Все'] + (sorted(df[df['category'] == selected_cat]['product'].unique()) if selected_cat != 'Все' else [])
     selected_prod = col3.selectbox("Товар", prods) if prods else None
     horizon = st.slider("Горизонт (периодов)", 1, 52, 5)
 
-    df_f = df.copy()
-    if selected_cat != 'Все': df_f = df_f[df_f['category'] == selected_cat]
-    if selected_prod and selected_prod != 'Все': df_f = df_f[df_f['product'] == selected_prod]
-    if df_f.empty:
-        st.warning("Нет данных для выбранной комбинации"); st.stop()
-
     if st.button("🚀 Построить прогноз"):
-        st_progress = st.progress(0)
-        st_status = st.empty()
-        try:
-            st_status.text("Агрегация..."); st_progress.progress(10)
+        df_f = df.copy()
+        if selected_cat != 'Все': df_f = df_f[df_f['category'] == selected_cat]
+        if selected_prod and selected_prod != 'Все': df_f = df_f[df_f['product'] == selected_prod]
+        if df_f.empty:
+            st.warning("Нет данных для выбранной комбинации"); st.stop()
+
+        with st.spinner("Выполняется прогноз..."):
             ts = df_f.set_index('datetime')['total'].astype(np.float64).resample(freq).sum()
             del df_f; gc.collect()
             ts = ts.asfreq(freq).interpolate().bfill().ffill().dropna()
@@ -84,7 +93,6 @@ if uploaded:
             sp = {'h': 24, 'D': 7, 'W-MON': 52, 'MS': 12}[freq]
             if sp >= len(train): sp = max(2, len(train) // 2)
 
-            st_status.text("Обучение Holt‑Winters..."); st_progress.progress(30)
             model = ExponentialSmoothing(train, trend='add', seasonal='add', seasonal_periods=sp,
                                          initialization_method='estimated').fit()
             pred_test = model.forecast(horizon)
@@ -95,7 +103,6 @@ if uploaded:
             full_model = ExponentialSmoothing(full_ts, trend='add', seasonal='add', seasonal_periods=sp,
                                               initialization_method='estimated').fit()
             forecast = full_model.forecast(horizon)
-
             next_date = pd.date_range(start=full_ts.index[-1], periods=2, freq=freq)[-1]
             future = pd.date_range(start=next_date, periods=horizon, freq=freq)
 
@@ -103,86 +110,94 @@ if uploaded:
             lower = forecast - 1.645 * std_res
             upper = forecast + 1.645 * std_res
 
-            st_progress.progress(90); st_status.text("Готово"); time.sleep(0.3)
-            st_progress.empty(); st_status.empty()
+            # Сохраняем в сессию
+            st.session_state['forecast_results'] = {
+                'train': train, 'test': test, 'future': future,
+                'forecast': forecast, 'lower': lower, 'upper': upper,
+                'rmse': rmse_val, 'mape': mape_val, 'freq_label': freq_label,
+                'horizon': horizon, 'selected_cat': selected_cat, 'selected_prod': selected_prod,
+                'freq': freq
+            }
 
-            st.subheader("Результаты прогнозирования")
-            c1, c2 = st.columns(2)
-            c1.metric("RMSE", f"{rmse_val:,.2f}")
-            c2.metric("MAPE", f"{mape_val:.2f}%")
+    # Отображение результатов (если они есть в сессии)
+    if 'forecast_results' in st.session_state:
+        res = st.session_state['forecast_results']
+        st.subheader("Результаты прогнозирования")
+        c1, c2 = st.columns(2)
+        c1.metric("RMSE", f"{res['rmse']:,.2f}")
+        c2.metric("MAPE", f"{res['mape']:.2f}%")
 
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=train.index, y=train.values, name='Обучающие данные'))
-            fig.add_trace(go.Scatter(x=test.index, y=test.values, name='Тестовые данные'))
-            fig.add_trace(go.Scatter(x=future, y=forecast, name='Прогноз'))
-            fig.add_trace(go.Scatter(x=np.concatenate([future, future[::-1]]),
-                                     y=np.concatenate([upper, lower[::-1]]),
-                                     fill='toself', fillcolor='rgba(44,160,44,0.2)',
-                                     line=dict(color='rgba(255,255,255,0)'), name='90% дов. интервал'))
-            fig.add_shape(type='line', x0=test.index[0], x1=test.index[0], y0=0, y1=1, yref='paper',
-                          line=dict(color='red', dash='dash'))
-            fig.add_annotation(x=test.index[0], y=1, yref='paper', text='Начало прогноза',
-                               showarrow=False, xanchor='left', textangle=-90)
-            fig.update_layout(title='Прогноз продаж', xaxis_title='Дата', yaxis_title='Сумма продаж')
-            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=res['train'].index, y=res['train'].values, name='Обучающие данные'))
+        fig.add_trace(go.Scatter(x=res['test'].index, y=res['test'].values, name='Тестовые данные'))
+        fig.add_trace(go.Scatter(x=res['future'], y=res['forecast'], name='Прогноз'))
+        fig.add_trace(go.Scatter(
+            x=np.concatenate([res['future'], res['future'][::-1]]),
+            y=np.concatenate([res['upper'], res['lower'][::-1]]),
+            fill='toself', fillcolor='rgba(44,160,44,0.2)',
+            line=dict(color='rgba(255,255,255,0)'), name='90% дов. интервал'))
+        fig.add_shape(type='line', x0=res['test'].index[0], x1=res['test'].index[0],
+                      y0=0, y1=1, yref='paper', line=dict(color='red', dash='dash'))
+        fig.add_annotation(x=res['test'].index[0], y=1, yref='paper', text='Начало прогноза',
+                           showarrow=False, xanchor='left', textangle=-90)
+        fig.update_layout(title='Прогноз продаж', xaxis_title='Дата', yaxis_title='Сумма продаж')
+        st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
-            st.subheader("Таблица прогнозных значений")
-            st.dataframe(pd.DataFrame({
-                'Дата': future.strftime('%Y-%m-%d'),
-                'Прогноз': forecast.round(2),
-                'Нижняя граница': lower.round(2),
-                'Верхняя граница': upper.round(2)
-            }), use_container_width=True)
+        st.subheader("Таблица прогнозных значений")
+        st.dataframe(pd.DataFrame({
+            'Дата': res['future'].strftime('%Y-%m-%d'),
+            'Прогноз': res['forecast'].round(2),
+            'Нижняя граница': res['lower'].round(2),
+            'Верхняя граница': res['upper'].round(2)
+        }), use_container_width=True)
 
-            if st.button("📄 Скачать отчёт (PDF)"):
-                pdf = FPDF()
-                pdf.add_page()
-                pdf.add_font('DejaVu', '', 'DejaVuSansCondensed.ttf', uni=True)
-                pdf.add_font('DejaVu', 'B', 'DejaVuSansCondensed-Bold.ttf', uni=True)
-                pdf.set_font('DejaVu', '', 14)
-                pdf.cell(0, 10, 'Отчёт о прогнозировании', ln=1, align='C')
-                pdf.ln(10)
-                pdf.set_font('DejaVu', '', 12)
-                pdf.cell(0, 10, f'Модель: экспоненциальное сглаживание Хольта-Винтерса', ln=1)
-                pdf.cell(0, 10, f'Периодичность: {freq_label} | Горизонт: {horizon} периодов', ln=1)
-                pdf.cell(0, 10, f'Категория: {selected_cat} | Товар: {selected_prod}', ln=1)
-                pdf.cell(0, 10, f'RMSE: {rmse_val:,.2f} | MAPE: {mape_val:.2f}%', ln=1)
-                pdf.ln(10)
+        # Кнопка PDF отдельно от прогноза
+        if st.button("📄 Скачать отчёт (PDF)"):
+            res = st.session_state['forecast_results']
+            fonts = get_dejavu_fonts()
+            pdf = FPDF()
+            pdf.add_page()
+            pdf.add_font('DejaVu', '', fonts['DejaVuSansCondensed.ttf'], uni=True)
+            pdf.add_font('DejaVu', 'B', fonts['DejaVuSansCondensed-Bold.ttf'], uni=True)
+            pdf.set_font('DejaVu', '', 14)
+            pdf.cell(0, 10, 'Отчёт о прогнозировании', ln=1, align='C')
+            pdf.ln(10)
+            pdf.set_font('DejaVu', '', 12)
+            pdf.cell(0, 10, f'Модель: экспоненциальное сглаживание Хольта-Винтерса', ln=1)
+            pdf.cell(0, 10, f'Периодичность: {res["freq_label"]} | Горизонт: {res["horizon"]} периодов', ln=1)
+            pdf.cell(0, 10, f'Категория: {res["selected_cat"]} | Товар: {res["selected_prod"]}', ln=1)
+            pdf.cell(0, 10, f'RMSE: {res["rmse"]:,.2f} | MAPE: {res["mape"]:.2f}%', ln=1)
+            pdf.ln(10)
 
-                pdf.set_font('DejaVu', 'B', 10)
-                pdf.cell(50, 8, 'Дата', 1)
-                pdf.cell(40, 8, 'Прогноз', 1)
-                pdf.cell(40, 8, 'Нижняя граница', 1)
-                pdf.cell(40, 8, 'Верхняя граница', 1)
+            pdf.set_font('DejaVu', 'B', 10)
+            pdf.cell(50, 8, 'Дата', 1)
+            pdf.cell(40, 8, 'Прогноз', 1)
+            pdf.cell(40, 8, 'Нижняя граница', 1)
+            pdf.cell(40, 8, 'Верхняя граница', 1)
+            pdf.ln()
+            pdf.set_font('DejaVu', '', 10)
+            for i, dt in enumerate(res['future']):
+                pdf.cell(50, 8, dt.strftime('%Y-%m-%d'), 1)
+                pdf.cell(40, 8, f"{res['forecast'][i]:,.2f}", 1)
+                pdf.cell(40, 8, f"{res['lower'][i]:,.2f}", 1)
+                pdf.cell(40, 8, f"{res['upper'][i]:,.2f}", 1)
                 pdf.ln()
-                pdf.set_font('DejaVu', '', 10)
-                for i, dt in enumerate(future):
-                    pdf.cell(50, 8, dt.strftime('%Y-%m-%d'), 1)
-                    pdf.cell(40, 8, f"{forecast[i]:,.2f}", 1)
-                    pdf.cell(40, 8, f"{lower[i]:,.2f}", 1)
-                    pdf.cell(40, 8, f"{upper[i]:,.2f}", 1)
-                    pdf.ln()
 
-                fig_mpl, ax = plt.subplots(figsize=(8, 4))
-                ax.plot(train.index, train.values, label='Обучающие')
-                ax.plot(test.index, test.values, label='Тестовые')
-                ax.plot(future, forecast, label='Прогноз')
-                ax.fill_between(future, lower, upper, alpha=0.2)
-                ax.axvline(test.index[0], color='red', linestyle='--')
-                ax.legend()
-                buf = BytesIO()
-                fig_mpl.savefig(buf, format='png', dpi=100)
-                buf.seek(0)
-                plt.close(fig_mpl)
-                pdf.image(buf, x=10, w=190)
-                buf.close()
+            fig_mpl, ax = plt.subplots(figsize=(8, 4))
+            ax.plot(res['train'].index, res['train'].values, label='Обучающие')
+            ax.plot(res['test'].index, res['test'].values, label='Тестовые')
+            ax.plot(res['future'], res['forecast'], label='Прогноз')
+            ax.fill_between(res['future'], res['lower'], res['upper'], alpha=0.2)
+            ax.axvline(res['test'].index[0], color='red', linestyle='--')
+            ax.legend()
+            buf = BytesIO()
+            fig_mpl.savefig(buf, format='png', dpi=100)
+            buf.seek(0)
+            plt.close(fig_mpl)
+            pdf.image(buf, x=10, w=190)
+            buf.close()
 
-                pdf_bytes = pdf.output()
-                b64 = base64.b64encode(pdf_bytes).decode()
-                href = f'<a href="data:application/pdf;base64,{b64}" download="forecast_report.pdf">Скачать PDF</a>'
-                st.markdown(href, unsafe_allow_html=True)
-
-        except Exception as e:
-            st.error(f"❌ Ошибка: {e}")
-        finally:
-            del train, test, ts; gc.collect()
+            pdf_bytes = pdf.output()
+            b64 = base64.b64encode(pdf_bytes).decode()
+            href = f'<a href="data:application/pdf;base64,{b64}" download="forecast_report.pdf">Скачать PDF</a>'
+            st.markdown(href, unsafe_allow_html=True)
