@@ -27,7 +27,7 @@ try:
 except ImportError:
     HAS_LGB = False
 
-# ------------------- Вспомогательные функции -------------------
+# ------------------- Улучшенные функции признаков -------------------
 def mape(y_true, y_pred):
     y_true, y_pred = np.array(y_true), np.array(y_pred)
     mask = y_true != 0
@@ -37,19 +37,34 @@ def mape(y_true, y_pred):
 
 def create_lag_features(series, lags, freq_str):
     df_feat = pd.DataFrame(index=series.index)
+    # Лаги и скользящие окна
     for lag in range(1, lags+1):
         df_feat[f'lag_{lag}'] = series.shift(lag)
-    df_feat['rolling_mean_3'] = series.rolling(3).mean()
+    for window in [2, 3, 5, 7, 14, 30]:
+        if window < len(series):
+            df_feat[f'rolling_mean_{window}'] = series.rolling(window=window).mean()
+            df_feat[f'rolling_std_{window}'] = series.rolling(window=window).std()
+    # Временные признаки
     freq_lower = str(freq_str).lower()
     if 'h' in freq_lower:
         df_feat['hour'] = series.index.hour
         df_feat['dayofweek'] = series.index.dayofweek
+        df_feat['month'] = series.index.month
+        df_feat['quarter'] = series.index.quarter
     elif 'd' in freq_lower:
         df_feat['dayofweek'] = series.index.dayofweek
+        df_feat['month'] = series.index.month
+        df_feat['quarter'] = series.index.quarter
+        df_feat['year'] = series.index.year
     elif 'w' in freq_lower:
         df_feat['weekofyear'] = series.index.isocalendar().week.astype(int)
+        df_feat['month'] = series.index.month
+        df_feat['quarter'] = series.index.quarter
+        df_feat['year'] = series.index.year
     elif 'm' in freq_lower:
         df_feat['month'] = series.index.month
+        df_feat['quarter'] = series.index.quarter
+        df_feat['year'] = series.index.year
     df_feat.dropna(inplace=True)
     return df_feat, series[df_feat.index]
 
@@ -57,21 +72,40 @@ def recursive_forecast(model, history_series, forecast_dates, lags, freq_str):
     hist = history_series.copy()
     preds = []
     freq_lower = str(freq_str).lower()
-    for dt in forecast_dates:
+    for i, dt in enumerate(forecast_dates):
+        # Формируем признаки из актуальной истории
         last_vals = hist.iloc[-lags:]
         feat = {}
-        for i in range(1, lags+1):
-            feat[f'lag_{i}'] = last_vals.iloc[-i] if len(last_vals) >= i else np.nan
-        feat['rolling_mean_3'] = last_vals[-3:].mean() if len(last_vals) >= 3 else np.mean(last_vals)
+        for lag in range(1, lags+1):
+            feat[f'lag_{lag}'] = last_vals.iloc[-lag] if len(last_vals) >= lag else np.nan
+        # Скользящие статистики (вычисляем заново по всей истории)
+        for window in [2, 3, 5, 7, 14, 30]:
+            if len(hist) >= window:
+                feat[f'rolling_mean_{window}'] = hist.iloc[-window:].mean()
+                feat[f'rolling_std_{window}'] = hist.iloc[-window:].std()
+            else:
+                feat[f'rolling_mean_{window}'] = np.mean(hist)
+                feat[f'rolling_std_{window}'] = np.std(hist)
+        # Временные метки новой даты
         if 'h' in freq_lower:
             feat['hour'] = dt.hour
             feat['dayofweek'] = dt.dayofweek
+            feat['month'] = dt.month
+            feat['quarter'] = dt.quarter
         elif 'd' in freq_lower:
             feat['dayofweek'] = dt.dayofweek
+            feat['month'] = dt.month
+            feat['quarter'] = dt.quarter
+            feat['year'] = dt.year
         elif 'w' in freq_lower:
             feat['weekofyear'] = dt.isocalendar().week
+            feat['month'] = dt.month
+            feat['quarter'] = dt.quarter
+            feat['year'] = dt.year
         elif 'm' in freq_lower:
             feat['month'] = dt.month
+            feat['quarter'] = dt.quarter
+            feat['year'] = dt.year
         X = pd.DataFrame([feat])
         pred = model.predict(X)[0]
         preds.append(pred)
@@ -88,7 +122,7 @@ def train_and_evaluate_ml(model, train_series, test_index, lags, freq_str):
 
 # ------------------- Интерфейс приложения -------------------
 st.set_page_config(layout="wide")
-st.title("Прогнозирование (ансамбль моделей) с очисткой данных")
+st.title("🔮 Прогнозирование (улучшенный ансамбль)")
 
 enc_choice = st.selectbox("Кодировка", ['auto','utf-8','cp1251','latin1','iso-8859-1','cp1252'], index=0)
 uploaded = st.file_uploader("CSV-файл", type="csv")
@@ -133,16 +167,8 @@ if uploaded is not None:
         df[c] = pd.to_numeric(df[c], errors='coerce')
     df.dropna(subset=['quantity','price','total'], inplace=True)
 
-    # Очистка данных
+    # Удаление дубликатов, отрицательных/нулевых total (выбросы не трогаем)
     df.drop_duplicates(inplace=True)
-
-    Q1 = df['total'].quantile(0.25)
-    Q3 = df['total'].quantile(0.75)
-    IQR = Q3 - Q1
-    lower_bound = Q1 - 1.5 * IQR
-    upper_bound = Q3 + 1.5 * IQR
-    df = df[(df['total'] >= lower_bound) & (df['total'] <= upper_bound)]
-
     df = df[df['total'] > 0]
     df.sort_values('datetime', inplace=True)
 
@@ -175,13 +201,20 @@ if uploaded is not None:
             train = ts.iloc[:-horizon]
             test = ts.iloc[-horizon:]
 
-            # Параметры лагов
-            lags = min(12, len(train)//2)
+            # Параметры лагов (больше для недель/месяцев)
+            if freq == 'h':
+                lags = min(48, len(train)//2)
+            elif freq == 'D':
+                lags = min(60, len(train)//2)
+            elif freq == 'W-MON':
+                lags = min(52, len(train)//2)
+            else:
+                lags = min(24, len(train)//2)
 
             results = {}
 
-            # Random Forest
-            rf = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+            # Random Forest с увеличенными деревьями
+            rf = RandomForestRegressor(n_estimators=200, max_depth=20, random_state=42, n_jobs=-1)
             pred_rf = train_and_evaluate_ml(rf, train, test.index, lags, freq)
             if pred_rf is not None:
                 rmse_rf = np.sqrt(mean_squared_error(test, pred_rf))
@@ -190,7 +223,7 @@ if uploaded is not None:
 
             # XGBoost
             if HAS_XGB:
-                xgb = XGBRegressor(n_estimators=100, random_state=42, verbosity=0, n_jobs=-1)
+                xgb = XGBRegressor(n_estimators=200, max_depth=7, learning_rate=0.05, random_state=42, verbosity=0, n_jobs=-1)
                 pred_xgb = train_and_evaluate_ml(xgb, train, test.index, lags, freq)
                 if pred_xgb is not None:
                     rmse_xgb = np.sqrt(mean_squared_error(test, pred_xgb))
@@ -199,7 +232,7 @@ if uploaded is not None:
 
             # LightGBM
             if HAS_LGB:
-                lgbm = LGBMRegressor(n_estimators=100, random_state=42, verbose=-1, n_jobs=-1)
+                lgbm = LGBMRegressor(n_estimators=200, max_depth=7, learning_rate=0.05, random_state=42, verbose=-1, n_jobs=-1)
                 pred_lgbm = train_and_evaluate_ml(lgbm, train, test.index, lags, freq)
                 if pred_lgbm is not None:
                     rmse_lgbm = np.sqrt(mean_squared_error(test, pred_lgbm))
@@ -222,14 +255,14 @@ if uploaded is not None:
             # Прогноз на полном ряде
             full = pd.concat([train, test])
             best_model = best['model']
-            # Обучаем лучшую модель на всех данных
-            X_full, y_full = create_lag_features(full, lags, freq)
-            if best_name in ['Random Forest']:
-                model_full = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+            # Переобучаем такую же модель на всех данных
+            if best_name == 'Random Forest':
+                model_full = RandomForestRegressor(n_estimators=200, max_depth=20, random_state=42, n_jobs=-1)
             elif best_name == 'XGBoost':
-                model_full = XGBRegressor(n_estimators=100, random_state=42, verbosity=0, n_jobs=-1)
+                model_full = XGBRegressor(n_estimators=200, max_depth=7, learning_rate=0.05, random_state=42, verbosity=0, n_jobs=-1)
             else:  # LightGBM
-                model_full = LGBMRegressor(n_estimators=100, random_state=42, verbose=-1, n_jobs=-1)
+                model_full = LGBMRegressor(n_estimators=200, max_depth=7, learning_rate=0.05, random_state=42, verbose=-1, n_jobs=-1)
+            X_full, y_full = create_lag_features(full, lags, freq)
             model_full.fit(X_full, y_full)
 
             # Будущие даты
@@ -281,7 +314,7 @@ if uploaded is not None:
             st.plotly_chart(fig, use_container_width=True,
                             config={'scrollZoom': True, 'displayModeBar': True})
 
-            # PDF-отчёт
+            # PDF-отчёт (опционально)
             if st.button("📄 Скачать PDF"):
                 from fpdf import FPDF
                 pdf = FPDF()
