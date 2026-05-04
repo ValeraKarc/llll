@@ -1,5 +1,6 @@
 import streamlit as st, pandas as pd, numpy as np, plotly.graph_objects as go
-from io import BytesIO, base64
+from io import BytesIO
+import base64
 import matplotlib, matplotlib.pyplot as plt, time, gc
 matplotlib.use('Agg')
 from sklearn.metrics import mean_squared_error
@@ -20,29 +21,30 @@ if uploaded:
     if uploaded.size > 150*1024*1024:
         st.error("❌ Файл > 150 МБ"); st.stop()
 
-    enc = st.selectbox("Кодировка", ['auto','utf-8','cp1251']); 
+    enc = st.selectbox("Кодировка", ['auto','utf-8','cp1251'])
     if enc == 'auto':
         raw = uploaded.read()
         try:
-            import chardet; enc = chardet.detect(raw)['encoding'] or 'utf-8'
+            import chardet
+            enc = chardet.detect(raw)['encoding'] or 'utf-8'
         except: enc = 'utf-8'
         uploaded.seek(0)
 
     try:
-        df = pd.read_csv(uploaded, encoding=enc, usecols=['date','time','category','product','quantity','price','total'],
-                         dtype={'date':str,'time':str,'category':str,'product':str,'quantity':np.float32,'price':np.float32,'total':np.float32})
+        df = pd.read_csv(uploaded, encoding=enc,
+                         usecols=['date','time','category','product','quantity','price','total'],
+                         dtype={'date':str,'time':str,'category':str,'product':str,
+                                'quantity':np.float32,'price':np.float32,'total':np.float32})
     except Exception as e:
         st.error(f"Ошибка чтения: {e}"); st.stop()
 
     if missing := [c for c in ['date','time','category','product','quantity','price','total'] if c not in df.columns]:
         st.error(f"❌ Нет столбцов: {', '.join(missing)}"); st.stop()
 
-    # Простейшая проверка инъекций
     for col in df.select_dtypes(object).columns:
         if df[col].astype(str).str.startswith(('=', '+', '-', '@')).any():
             st.error("⚠️ Опасные символы в начале ячеек"); st.stop()
 
-    # Очистка
     df['datetime'] = pd.to_datetime(df['date'].astype(str).str.strip() + ' ' + df['time'].astype(str).str.strip(), errors='coerce')
     df.dropna(subset=['datetime', 'quantity', 'price', 'total'], inplace=True)
     df = df[df['total'] > 0].drop_duplicates()
@@ -91,7 +93,7 @@ if uploaded:
                                               initialization_method='estimated').fit()
             forecast = full_model.forecast(horizon)
 
-            # Безопасный расчёт будущих дат
+            # Безопасный расчёт следующей даты (исправлена ошибка с Timestamp)
             next_date = pd.date_range(start=full_ts.index[-1], periods=2, freq=freq)[-1]
             future = pd.date_range(start=next_date, periods=horizon, freq=freq)
 
@@ -102,10 +104,9 @@ if uploaded:
             st_progress.empty(); st_status.empty()
 
             st.subheader("Результаты")
-            col1, col2 = st.columns(2)
-            col1.metric("RMSE", f"{rmse_val:,.2f}"); col2.metric("MAPE", f"{mape_val:.2f}%")
+            c1, c2 = st.columns(2)
+            c1.metric("RMSE", f"{rmse_val:,.2f}"); c2.metric("MAPE", f"{mape_val:.2f}%")
 
-            # График (без add_vline, только add_shape)
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=train.index, y=train.values, name='Train'))
             fig.add_trace(go.Scatter(x=test.index, y=test.values, name='Test'))
@@ -116,12 +117,11 @@ if uploaded:
                                      line=dict(color='rgba(255,255,255,0)'), name='90% CI'))
             fig.add_shape(type='line', x0=test.index[0], x1=test.index[0], y0=0, y1=1, yref='paper',
                           line=dict(color='red', dash='dash'))
-            fig.add_annotation(x=test.index[0], y=1, yref='paper', text='Прогноз', showarrow=False,
-                               xanchor='left', textangle=-90)
+            fig.add_annotation(x=test.index[0], y=1, yref='paper', text='Прогноз',
+                               showarrow=False, xanchor='left', textangle=-90)
             fig.update_layout(title='Прогноз (Holt‑Winters)', xaxis_title='Дата', yaxis_title='Сумма')
             st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
-            # Таблица
             st.subheader("📋 Прогнозные значения")
             st.dataframe(pd.DataFrame({
                 'Дата': future.strftime('%Y-%m-%d'),
@@ -130,7 +130,6 @@ if uploaded:
                 'Верхняя': upper.round(2)
             }), use_container_width=True)
 
-            # PDF
             if st.button("📄 PDF"):
                 pdf = FPDF(); pdf.add_page()
                 pdf.set_font("Arial", size=12)
@@ -139,7 +138,8 @@ if uploaded:
                 pdf.cell(200,10,f"Модель: Holt‑Winters | RMSE: {rmse_val:,.2f} | MAPE: {mape_val:.2f}%",ln=1)
                 pdf.ln(5)
                 pdf.set_font("Arial",'B',9)
-                pdf.cell(50,8,"Дата",1); pdf.cell(40,8,"Прогноз",1); pdf.cell(40,8,"Нижняя",1); pdf.cell(40,8,"Верхняя",1)
+                pdf.cell(50,8,"Дата",1); pdf.cell(40,8,"Прогноз",1)
+                pdf.cell(40,8,"Нижняя",1); pdf.cell(40,8,"Верхняя",1)
                 pdf.ln()
                 pdf.set_font("Arial", size=9)
                 for i, dt in enumerate(future):
@@ -149,14 +149,19 @@ if uploaded:
                     pdf.cell(40,8,f"{upper[i]:,.2f}",1)
                     pdf.ln()
                 fig_mpl, ax = plt.subplots(figsize=(8,4))
-                ax.plot(train.index, train.values, label='Train'); ax.plot(test.index, test.values, label='Test')
-                ax.plot(future, forecast, label='Forecast'); ax.fill_between(future, lower, upper, alpha=0.2)
-                ax.axvline(test.index[0], color='red', linestyle='--'); ax.legend()
-                buf = BytesIO(); fig_mpl.savefig(buf, format='png', dpi=100); buf.seek(0); plt.close(fig_mpl)
+                ax.plot(train.index, train.values, label='Train')
+                ax.plot(test.index, test.values, label='Test')
+                ax.plot(future, forecast, label='Forecast')
+                ax.fill_between(future, lower, upper, alpha=0.2)
+                ax.axvline(test.index[0], color='red', linestyle='--')
+                ax.legend()
+                buf = BytesIO(); fig_mpl.savefig(buf, format='png', dpi=100); buf.seek(0)
+                plt.close(fig_mpl)
                 pdf.image(buf, x=10, w=190); buf.close()
                 pdf_bytes = pdf.output(dest='S').encode('latin-1')
                 b64 = base64.b64encode(pdf_bytes).decode()
-                st.markdown(f'<a href="data:application/pdf;base64,{b64}" download="forecast.pdf">Скачать PDF</a>', unsafe_allow_html=True)
+                href = f'<a href="data:application/pdf;base64,{b64}" download="forecast.pdf">Скачать PDF</a>'
+                st.markdown(href, unsafe_allow_html=True)
 
         except Exception as e:
             st.error(f"❌ Ошибка: {e}")
