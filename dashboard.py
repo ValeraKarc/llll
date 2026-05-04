@@ -4,7 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 from io import BytesIO
 import base64
-import os, warnings, gc, time
+import warnings, gc, time, os
 warnings.filterwarnings('ignore')
 
 import matplotlib
@@ -244,13 +244,12 @@ if uploaded is not None:
                         n_estimators=30,
                         max_depth=5,
                         random_state=42,
-                        n_jobs=-1  # использовать все ядра
+                        n_jobs=-1
                     )
                     rf.fit(X_train, y_train)
 
                     # Рекурсивный прогноз на тестовый период
                     test_pred = []
-                    # Берём последние lags значений из тренировочной части
                     history = y_train.iloc[-lags:].values.tolist()
                     for _ in range(len(test)):
                         feat = {f'lag_{i+1}': history[-i-1] for i in range(lags)}
@@ -311,7 +310,6 @@ if uploaded is not None:
                 )
                 full_model.fit(X_full, y_full)
 
-                # Рекурсивный прогноз на будущее
                 history = y_full.iloc[-lags:].values.tolist()
                 forecast = []
                 for _ in range(horizon):
@@ -327,18 +325,10 @@ if uploaded is not None:
             lower = forecast - 1.645 * std_res
             upper = forecast + 1.645 * std_res
 
-            # ----- Построение будущих дат -----
-            if freq == 'MS':
-                start = full_ts.index[-1] + pd.DateOffset(months=1)
-            elif freq == 'W-MON':
-                start = full_ts.index[-1] + pd.DateOffset(weeks=1)
-            elif freq == 'h':
-                start = full_ts.index[-1] + pd.DateOffset(hours=1)
-            elif freq == 'D':
-                start = full_ts.index[-1] + pd.DateOffset(days=1)
-            else:
-                start = full_ts.index[-1] + pd.Timedelta(1, unit=freq)
-            future = pd.date_range(start=start, periods=horizon, freq=freq)
+            # ----- Построение будущих дат (исправлено!) -----
+            # Безопасное вычисление начала прогнозного периода
+            next_period = pd.date_range(start=full_ts.index[-1], periods=2, freq=freq)[-1]
+            future = pd.date_range(start=next_period, periods=horizon, freq=freq)
 
             elapsed = time.time() - start_time
             progress_bar.progress(90)
@@ -443,6 +433,5 @@ if uploaded is not None:
         except Exception as e:
             st.error(f"❌ Во время выполнения прогноза произошла ошибка: {e}")
         finally:
-            # Окончательная очистка памяти
             del train, test, ts
             gc.collect()
