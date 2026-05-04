@@ -5,8 +5,8 @@ plotly
 scikit-learn
 xgboost
 lightgbm
-statsmodels
 pmdarima
+statsmodels
 fpdf
 matplotlib
 chardet
