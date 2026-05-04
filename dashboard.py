@@ -14,6 +14,12 @@ from sklearn.metrics import mean_squared_error
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.seasonal import seasonal_decompose
 
+try:
+    from xgboost import XGBRegressor
+    HAS_XGB = True
+except ImportError:
+    HAS_XGB = False
+
 # ---------------------------- Праздники РФ ----------------------------
 RUSSIAN_HOLIDAYS = {
     '2020-01-01','2020-01-02','2020-01-03','2020-01-04','2020-01-05','2020-01-06','2020-01-07','2020-01-08',
@@ -41,8 +47,8 @@ def mape(y_true, y_pred):
     if np.sum(mask) == 0: return np.inf
     return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask]))
 
-# ---------------------------- Обучение Random Forest ----------------------------
-def train_rf_model(train_series, test_index, lags, freq, holiday_series=None):
+# ---------------------------- Обучение ML (RF и XGBoost) ----------------------------
+def train_ml_model(model, train_series, test_index, lags, freq, holiday_series=None):
     X = pd.DataFrame(index=train_series.index)
     for lag in range(1, lags+1):
         X[f'lag_{lag}'] = train_series.shift(lag)
@@ -53,9 +59,8 @@ def train_rf_model(train_series, test_index, lags, freq, holiday_series=None):
     X, y = X.loc[valid], y.loc[valid]
     if len(X) < 5:
         return None, None
-    rf = RandomForestRegressor(n_estimators=30, max_depth=5, random_state=42, n_jobs=-1)
-    rf.fit(X, y)
-    # рекурсивный прогноз
+    model.fit(X, y)
+    # Рекурсивный прогноз на тестовый период
     test_pred = []
     hist = y.iloc[-lags:].tolist()
     for i, dt in enumerate(test_index):
@@ -65,10 +70,10 @@ def train_rf_model(train_series, test_index, lags, freq, holiday_series=None):
         if holiday_series is not None:
             feat['holiday'] = 1 if is_holiday(dt) else 0
         X_row = pd.DataFrame([feat])
-        pred = rf.predict(X_row)[0]
+        pred = model.predict(X_row)[0]
         test_pred.append(pred)
         hist.append(pred)
-    return np.array(test_pred), rf
+    return np.array(test_pred), model
 
 # ---------------------------- Интерфейс ----------------------------
 st.set_page_config(page_title="Интеллектуальная модель прогнозирования продаж", layout="wide")
@@ -157,12 +162,11 @@ if uploaded:
 
             train, test = ts.iloc[:-horizon], ts.iloc[-horizon:]
 
-            # Параметры сезонности и лагов
+            # Параметры
             sp = {'h':24,'D':7,'W-MON':52,'MS':12}[freq]
             if sp >= len(train): sp = max(2, len(train)//2)
-            lags = 12 if freq == 'W-MON' else min(6, len(train)//2)  # для недель больше лагов
+            lags = 12 if freq == 'W-MON' else min(6, len(train)//2)
 
-            # Признак праздников
             holiday_series = None
             if freq in ('D','W-MON'):
                 holiday_series = pd.Series(
@@ -172,36 +176,58 @@ if uploaded:
 
             models = {}
 
-            # Holt-Winters
-            status.text("Holt-Winters..."); progress.progress(25)
+            # 1. Holt-Winters
+            status.text("Holt-Winters..."); progress.progress(20)
             try:
                 hw = ExponentialSmoothing(train, trend='add', seasonal='add',
                                           seasonal_periods=sp,
                                           initialization_method='estimated').fit()
-                pred_hw = hw.forecast(horizon)
-                rmse = np.sqrt(mean_squared_error(test, pred_hw))
-                m = mape(test, pred_hw)*100
-                models['Holt-Winters'] = {'rmse':rmse,'mape':m,'pred_test':pred_hw,'model':hw}
+                pred = hw.forecast(horizon)
+                models['Holt-Winters'] = {
+                    'rmse': np.sqrt(mean_squared_error(test, pred)),
+                    'mape': mape(test, pred)*100,
+                    'pred_test': pred,
+                    'model': hw
+                }
             except Exception as e:
                 st.warning(f"Holt-Winters: {e}")
 
-            # Random Forest (всегда)
-            status.text("Random Forest..."); progress.progress(50)
-            pred_rf, rf = train_rf_model(train, test.index, lags, freq, holiday_series)
+            # 2. Random Forest
+            status.text("Random Forest..."); progress.progress(40)
+            rf = RandomForestRegressor(n_estimators=30, max_depth=5, random_state=42, n_jobs=-1)
+            pred_rf, rf_model = train_ml_model(rf, train, test.index, lags, freq, holiday_series)
             if pred_rf is not None:
-                rmse = np.sqrt(mean_squared_error(test, pred_rf))
-                m = mape(test, pred_rf)*100
-                models['Random Forest'] = {'rmse':rmse,'mape':m,'pred_test':pred_rf,'model':rf}
+                models['Random Forest'] = {
+                    'rmse': np.sqrt(mean_squared_error(test, pred_rf)),
+                    'mape': mape(test, pred_rf)*100,
+                    'pred_test': pred_rf,
+                    'model': rf_model
+                }
+
+            # 3. XGBoost (если доступен)
+            if HAS_XGB:
+                status.text("XGBoost..."); progress.progress(60)
+                xgb = XGBRegressor(n_estimators=30, max_depth=5, learning_rate=0.1,
+                                   random_state=42, verbosity=0, n_jobs=-1)
+                pred_xgb, xgb_model = train_ml_model(xgb, train, test.index, lags, freq, holiday_series)
+                if pred_xgb is not None:
+                    models['XGBoost'] = {
+                        'rmse': np.sqrt(mean_squared_error(test, pred_xgb)),
+                        'mape': mape(test, pred_xgb)*100,
+                        'pred_test': pred_xgb,
+                        'model': xgb_model
+                    }
 
             if not models:
                 st.error("Модели не обучились"); st.stop()
 
-            best_name = min(models, key=lambda k: models[k]['rmse'])
+            # Выбор лучшей модели по MAPE (меньше – лучше)
+            best_name = min(models, key=lambda k: models[k]['mape'])
             best = models[best_name]
 
-            status.text(f"Лучшая модель: {best_name}"); progress.progress(70)
+            status.text(f"Лучшая модель: {best_name} (MAPE={best['mape']:.2f}%)"); progress.progress(75)
 
-            # Финальное обучение
+            # Финальное обучение на всех данных
             full_ts = pd.concat([train, test])
             from pandas.tseries.frequencies import to_offset
             start_future = full_ts.index[-1] + to_offset(freq)
@@ -213,6 +239,7 @@ if uploaded:
                                                   initialization_method='estimated').fit()
                 forecast = full_model.forecast(horizon)
             else:
+                # Обучение ML на полном ряду
                 X_full = pd.DataFrame(index=full_ts.index)
                 for lag in range(1, lags+1):
                     X_full[f'lag_{lag}'] = full_ts.shift(lag)
@@ -223,12 +250,19 @@ if uploaded:
                 y_full = full_ts.copy()
                 valid = ~X_full.isna().any(axis=1)
                 X_full, y_full = X_full.loc[valid], y_full.loc[valid]
-                rf_full = RandomForestRegressor(n_estimators=30, max_depth=5, random_state=42, n_jobs=-1)
-                rf_full.fit(X_full, y_full)
+
+                # Создаём новую модель такого же типа
+                if best_name == 'Random Forest':
+                    full_model = RandomForestRegressor(n_estimators=30, max_depth=5, random_state=42, n_jobs=-1)
+                else:  # XGBoost
+                    full_model = XGBRegressor(n_estimators=30, max_depth=5, learning_rate=0.1,
+                                              random_state=42, verbosity=0, n_jobs=-1)
+                full_model.fit(X_full, y_full)
 
                 future_hol = None
                 if freq in ('D','W-MON'):
                     future_hol = [1 if is_holiday(d) else 0 for d in future]
+
                 hist = y_full.iloc[-lags:].tolist()
                 forecast = []
                 for i in range(horizon):
@@ -238,24 +272,31 @@ if uploaded:
                     if future_hol is not None:
                         feat['holiday'] = future_hol[i]
                     X_row = pd.DataFrame([feat])
-                    pred = rf_full.predict(X_row)[0]
+                    pred = full_model.predict(X_row)[0]
                     forecast.append(pred)
                     hist.append(pred)
                 forecast = np.array(forecast)
 
+            # 90% доверительный интервал
             std_res = np.std(np.array(test) - np.array(best['pred_test']))
             lower = forecast - 1.645*std_res
             upper = forecast + 1.645*std_res
 
-            progress.progress(90)
+            progress.progress(95)
             status.empty(); progress.empty()
 
-            # Вывод
+            # ---------- Результаты ----------
             st.subheader(f"🏆 Результаты (модель: {best_name})")
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             col1.metric("RMSE", f"{best['rmse']:,.2f}")
             col2.metric("MAPE", f"{best['mape']:.2f}%")
+            # Также покажем лучшую другую модель для сравнения
+            other_models = [m for m in models if m != best_name]
+            if other_models:
+                best_other = min(other_models, key=lambda x: models[x]['mape'])
+                col3.metric(f"Альтернатива: {best_other}", f"MAPE {models[best_other]['mape']:.2f}%")
 
+            # График
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=train.index, y=train.values, name='Обучающие', line=dict(color='blue')))
             fig.add_trace(go.Scatter(x=test.index, y=test.values, name='Тестовые', line=dict(color='orange')))
@@ -272,26 +313,31 @@ if uploaded:
             fig.update_layout(title=f'Прогноз ({best_name})', xaxis_title='Дата', yaxis_title='Сумма')
             st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
-            st.subheader("📋 Таблица прогноза")
+            # Таблица прогноза
+            st.subheader("📋 Таблица прогнозных значений")
             st.dataframe(pd.DataFrame({
                 'Дата': future.strftime('%d-%m-%Y'),
                 'Прогноз': forecast.round(2),
-                'Нижняя гр. (90%)': lower.round(2),
-                'Верхняя гр. (90%)': upper.round(2)
+                'Нижняя граница (90%)': lower.round(2),
+                'Верхняя граница (90%)': upper.round(2)
             }), use_container_width=True)
 
+            # Расширенная аналитика
             if show_advanced:
                 st.subheader("📊 Расширенная аналитика")
-                if len(models) > 1:
-                    comp = pd.DataFrame([
-                        {'Модель':n,'RMSE':d['rmse'],'MAPE':d['mape']} for n,d in models.items()
-                    ]).sort_values('RMSE')
-                    fig_c = make_subplots(rows=1, cols=2, subplot_titles=('RMSE','MAPE'))
-                    fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['RMSE'], name='RMSE'), 1, 1)
-                    fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['MAPE'], name='MAPE'), 1, 2)
-                    fig_c.update_layout(showlegend=False)
-                    st.plotly_chart(fig_c, use_container_width=True)
+                # Сравнение моделей
+                comp = pd.DataFrame([
+                    {'Модель':n, 'RMSE':d['rmse'], 'MAPE':d['mape']} for n,d in models.items()
+                ]).sort_values('MAPE')
+                st.dataframe(comp, use_container_width=True)
 
+                fig_c = make_subplots(rows=1, cols=2, subplot_titles=('RMSE','MAPE'))
+                fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['RMSE'], name='RMSE'), 1, 1)
+                fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['MAPE'], name='MAPE'), 1, 2)
+                fig_c.update_layout(showlegend=False)
+                st.plotly_chart(fig_c, use_container_width=True)
+
+                # Декомпозиция
                 if len(train) >= 2*sp+10:
                     try:
                         dec = seasonal_decompose(train, model='additive', period=sp)
@@ -304,11 +350,12 @@ if uploaded:
                         st.plotly_chart(fd, use_container_width=True)
                     except: pass
 
+                # Остатки на тесте
                 resid = test.values - best['pred_test']
                 fig_r = go.Figure()
                 fig_r.add_trace(go.Scatter(x=test.index, y=resid, name='Остатки'))
                 fig_r.add_hline(y=0, line_dash='dash', line_color='red')
-                fig_r.update_layout(title='Остатки на тесте')
+                fig_r.update_layout(title='Остатки на тестовом периоде')
                 st.plotly_chart(fig_r, use_container_width=True)
 
             st.caption(f"⏱️ Прогноз построен за {time.time()-start:.1f} сек.")
