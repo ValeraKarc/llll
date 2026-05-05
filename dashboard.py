@@ -168,9 +168,8 @@ def process_target(df_f, target_col, freq, horizon):
         for lag in range(1, lags+1):
             X_full[f'lag_{lag}'] = full_ts.shift(lag)
         if holiday_series is not None:
-            full_hol = pd.Series([1 if is_holiday(d) else 0 for d in full_ts.index],
-                                 index=full_ts.index, dtype=np.int8)
-            X_full['holiday'] = full_hol
+            X_full['holiday'] = pd.Series([is_holiday(d) for d in full_ts.index],
+                                          index=full_ts.index, dtype=np.int8)
         y_full = full_ts.copy()
         valid = ~X_full.isna().any(axis=1)
         X_full, y_full = X_full.loc[valid], y_full.loc[valid]
