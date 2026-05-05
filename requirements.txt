@@ -3,7 +3,10 @@ pandas
 numpy
 plotly
 scikit-learn
+xgboost
+lightgbm
 statsmodels
-fpdf
+fpdf2
 matplotlib
 chardet
+scipy
