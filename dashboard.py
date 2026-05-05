@@ -270,8 +270,8 @@ if uploaded:
         st.error("Нет данных после очистки"); st.stop()
 
     st.success(f"✅ {len(df)} записей загружено")
-    with st.expander("🔍 Первые 10 строк"):
-        st.dataframe(df.head(10))
+    with st.expander("🔍 Первые 5 строк"):
+        st.dataframe(df.head(5))
 
     col1, col2, col3 = st.columns(3)
     freq_map = {'неделя': 'W-MON', 'месяц': 'MS'}
