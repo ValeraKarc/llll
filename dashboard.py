@@ -150,14 +150,11 @@ def process_target(df_f, target_col, freq, horizon):
     # Финальный прогноз (полный ряд)
     full_ts = pd.concat([train, test])
     if freq == 'W-MON':
-        start_future = full_ts.index[-1] + pd.Timedelta(weeks=1)
+        start_future = full_ts.index[-1] + pd.DateOffset(weeks=1)
     elif freq == 'MS':
-        if full_ts.index[-1].month == 12:
-            start_future = pd.Timestamp(year=full_ts.index[-1].year+1, month=1, day=1)
-        else:
-            start_future = pd.Timestamp(year=full_ts.index[-1].year, month=full_ts.index[-1].month+1, day=1)
+        start_future = full_ts.index[-1] + pd.DateOffset(months=1)
     else:
-        start_future = full_ts.index[-1] + pd.Timedelta(1, unit=freq)
+        start_future = full_ts.index[-1] + pd.DateOffset(1)
     future = pd.date_range(start=start_future, periods=horizon, freq=freq)
 
     if best_name == 'Holt-Winters':
