@@ -377,120 +377,47 @@ if uploaded:
             # Для краткости здесь опущен, но в реальном коде он должен быть
 
         # Кнопка PDF (вынесена отдельно)
-        if st.button("📄 Скачать отчёт (PDF)"):
-            import tempfile
+if st.button("📄 Скачать отчёт (PDF)"):
+    # 1. Рисуем фигуру matplotlib с графиком и сводкой
+    fig_mpl, ax = plt.subplots(figsize=(10, 6))
+    # Заголовок и метрики
+    title = f"Прогноз продаж\nМодель: {res_total['best_name']} | {data['freq_label']} | Горизонт: {data['horizon']}\n"
+    title += f"RMSE: {res_total['rmse']:,.2f}   MAPE: {res_total['mape']:.2f}%"
+    ax.set_title(title, fontsize=12, loc='center')
+    # Исторические данные
+    ax.plot(res_total['train'].index, res_total['train'].values, label='Train', color='blue')
+    ax.plot(res_total['test'].index, res_total['test'].values, label='Test', color='orange')
+    # Прогноз
+    ax.plot(res_total['future'], res_total['forecast'], label='Forecast', color='green')
+    ax.fill_between(res_total['future'], res_total['lower'], res_total['upper'],
+                    alpha=0.2, color='green')
+    # Вертикальная линия
+    split_date = res_total['test'].index[0]
+    ax.axvline(split_date, color='red', linestyle='--', label='Начало прогноза')
+    ax.legend()
+    ax.set_xlabel('Дата')
+    ax.set_ylabel('Сумма продаж')
+    plt.tight_layout()
 
-            # Создаём фигуру matplotlib, содержащую все результаты
-            fig_mpl, (ax_text, ax_table) = plt.subplots(2, 1, figsize=(10, 8),
-                                                         gridspec_kw={'height_ratios': [1, 3]})
+    # 2. Сохраняем в BytesIO
+    buf = BytesIO()
+    fig_mpl.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig_mpl)
 
-            # --- Верхняя часть: текстовая сводка ---
-            ax_text.axis('off')
-            summary = (
-                f"Forecast Report\n"
-                f"Model: {res_total['best_name']}\n"
-                f"Period: {data['freq_label']}, Horizon: {data['horizon']}\n"
-                f"RMSE: {res_total['rmse']:,.2f}, MAPE: {res_total['mape']:.2f}%\n"
-            )
-            if res_qty is not None:
-                summary += "Quantity forecast included\n"
-            ax_text.text(0.5, 0.5, summary, transform=ax_text.transAxes,
-                         fontsize=14, ha='center', va='center',
-                         family='monospace', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    # 3. Создаём PDF и вставляем картинку
+    pdf = FPDF(orientation='L', unit='mm', format='A4')
+    pdf.add_page()
+    # Сохраняем картинку во временный файл (fpdf2 требует файл)
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+        tmp.write(buf.getvalue())
+        tmp_path = tmp.name
+    pdf.image(tmp_path, x=0, y=0, w=pdf.w, h=pdf.h)   # растягиваем на всю страницу
+    os.unlink(tmp_path)   # удаляем временный файл
 
-            # --- Средняя часть: график прогноза ---
-            ax_table.plot(res_total['train'].index, res_total['train'].values,
-                          label='Train', color='blue')
-            ax_table.plot(res_total['test'].index, res_total['test'].values,
-                          label='Test', color='orange')
-            ax_table.plot(res_total['future'], res_total['forecast'],
-                          label='Forecast', color='green')
-            ax_table.fill_between(res_total['future'],
-                                  res_total['lower'], res_total['upper'],
-                                  alpha=0.2, color='green')
-            ax_table.axvline(split, color='red', linestyle='--')
-            ax_table.legend()
-            ax_table.set_title(f'Forecast ({res_total["best_name"]})')
-            ax_table.set_xlabel('Date')
-            ax_table.set_ylabel('Total')
-
-            # --- Нижняя часть: таблица прогнозных значений (скрыто в этом же axes?) ---
-            # Перенесём таблицу в отдельный блок ниже, но места уже нет, поэтому просто добавим таблицу под графиком
-            # matplotlib-таблицу можно разместить в другом axes, но мы уже использовали 2 строки.
-            # Поэтому сделаем ещё один subplot с таблицей.
-            # Но для простоты можно просто сохранить текущую фигуру (она и так содержит основные данные),
-            # а таблицу добавим в PDF как отдельное изображение? Нет, условие было – таблица должна быть в PDF.
-            # Лучше создать фигуру из 3 частей: текст, график, таблица.
-            # Переделаем структуру: создадим 3 subplots: ax_text, ax_plot, ax_tbl.
-
-            plt.close(fig_mpl)  # закроем предыдущую
-
-            fig_pdf, (ax_text, ax_plot, ax_tbl) = plt.subplots(3, 1, figsize=(10, 12),
-                                                                gridspec_kw={'height_ratios': [0.5, 2, 1.5]})
-
-            # Текстовая сводка
-            ax_text.axis('off')
-            ax_text.text(0.5, 0.5, summary, transform=ax_text.transAxes,
-                         fontsize=12, ha='center', va='center', family='monospace',
-                         bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
-
-            # График
-            ax_plot.plot(res_total['train'].index, res_total['train'].values, label='Train', color='blue')
-            ax_plot.plot(res_total['test'].index, res_total['test'].values, label='Test', color='orange')
-            ax_plot.plot(res_total['future'], res_total['forecast'], label='Forecast', color='green')
-            ax_plot.fill_between(res_total['future'], res_total['lower'], res_total['upper'], alpha=0.2)
-            ax_plot.axvline(split, color='red', linestyle='--')
-            ax_plot.legend()
-            ax_plot.set_title(f'Forecast ({res_total["best_name"]})')
-            ax_plot.set_xlabel('Date')
-            ax_plot.set_ylabel('Total')
-
-            # Таблица прогнозных значений (подготовим данные)
-            columns = ['Date', 'Forecast', 'Lower 90%', 'Upper 90%']
-            if res_qty is not None:
-                columns.append('Quantity')
-            table_data = []
-            for i, dt in enumerate(res_total['future']):
-                row = [dt.strftime('%d-%m-%Y'),
-                       f"{res_total['forecast'][i]:,.2f}",
-                       f"{res_total['lower'][i]:,.2f}",
-                       f"{res_total['upper'][i]:,.2f}"]
-                if res_qty is not None:
-                    row.append(f"{res_qty['forecast'][i]:,.0f}")
-                table_data.append(row)
-
-            # Отрисовка таблицы matplotlib
-            ax_tbl.axis('tight')
-            ax_tbl.axis('off')
-            tbl = ax_tbl.table(cellText=table_data, colLabels=columns,
-                               loc='center', cellLoc='center')
-            tbl.auto_set_font_size(False)
-            tbl.set_fontsize(8)
-            tbl.scale(1, 1.5)
-            for (row, col), cell in tbl.get_celld().items():
-                if row == 0:  # заголовок
-                    cell.set_facecolor('#40466e')
-                    cell.set_text_props(weight='bold', color='white')
-
-            plt.tight_layout()
-
-            # Сохраняем в PNG
-            buf = BytesIO()
-            fig_pdf.savefig(buf, format='png', dpi=120)
-            buf.seek(0)
-            plt.close(fig_pdf)
-
-            # Создаём PDF и вставляем картинку
-            pdf = FPDF(orientation='L', unit='mm', format='A4')
-            pdf.add_page()
-            # Сохраняем PNG во временный файл (для корректной работы pdf.image)
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
-                tmp.write(buf.getvalue())
-                tmp_path = tmp.name
-            pdf.image(tmp_path, x=0, y=0, w=pdf.w, h=pdf.h)  # растягиваем на всю страницу
-            os.unlink(tmp_path)  # удаляем временный файл
-
-            pdf_bytes = pdf.output()
-            b64 = base64.b64encode(pdf_bytes).decode()
-            href = f'<a href="data:application/pdf;base64,{b64}" download="forecast_report.pdf">Скачать PDF</a>'
-            st.markdown(href, unsafe_allow_html=True)
+    # 4. Отдаём PDF
+    pdf_bytes = pdf.output()
+    b64 = base64.b64encode(pdf_bytes).decode()
+    href = f'<a href="data:application/pdf;base64,{b64}" download="forecast_report.pdf">Скачать PDF</a>'
+    st.markdown(href, unsafe_allow_html=True)
