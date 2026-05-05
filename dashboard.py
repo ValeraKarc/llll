@@ -1,7 +1,7 @@
 import streamlit as st, pandas as pd, numpy as np, plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from io import BytesIO
-import base64, time, gc, os, warnings
+import base64, time, gc, os, tempfile, warnings
 warnings.filterwarnings('ignore')
 
 import matplotlib
@@ -138,7 +138,7 @@ def process_target(df_f, target_col, freq, horizon):
 
     # XGBoost
     if HAS_XGB:
-        xgb = XGBRegressor(n_estimators=80, max_depth=6, learning_rate=0.05,
+        xgb = XGBRegenerator(n_estimators=80, max_depth=6, learning_rate=0.05,
                            random_state=42, verbosity=0, n_jobs=-1)
         pred_xgb, xgb_model, X_xgb = train_ml_model(xgb, train, test.index, lags, freq, holiday_series)
         if pred_xgb is not None:
@@ -283,7 +283,7 @@ if uploaded:
     prods = ['Все'] + (sorted(df[df['category']==selected_cat]['product'].unique()) if selected_cat!='Все' else [])
     selected_prod = col3.selectbox("Товар", prods) if prods else None
     horizon = st.slider("Горизонт (периодов)", 1, 52, 5)
-    show_advanced = st.checkbox("📊 Расширенная аналитика")
+    show_advanced = st.checkbox("📊 Расширенная аналитика (корреляции, важность признаков, ACF)")
 
     # Фильтрация
     df_f = df.copy()
@@ -308,6 +308,7 @@ if uploaded:
 
             progress.progress(90)
             status.text("Формирование результатов...")
+            time.sleep(0.5)
 
             # Сохраняем в сессию
             st.session_state['forecast'] = {
@@ -370,54 +371,115 @@ if uploaded:
             table_df['Прогноз количества'] = res_qty['forecast'].round(0).astype(int)
         st.dataframe(table_df, use_container_width=True)
 
-        # Расширенная аналитика (если чекбокс)
+        # Расширенная аналитика
         if show_advanced:
             st.subheader("📊 Расширенная аналитика (сумма продаж)")
-            # ... (полный блок расширенной аналитики, как в предыдущей версии)
-            # Для краткости здесь опущен, но в реальном коде он должен быть
+            # Сравнение моделей
+            comp = pd.DataFrame([
+                {'Модель':n, 'RMSE':d['rmse'], 'MAPE':d['mape']} for n,d in res_total['models'].items()
+            ]).sort_values('MAPE')
+            fig_c = make_subplots(rows=1, cols=2, subplot_titles=('RMSE','MAPE'))
+            fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['RMSE'], name='RMSE'), 1, 1)
+            fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['MAPE'], name='MAPE'), 1, 2)
+            fig_c.update_layout(showlegend=False)
+            st.plotly_chart(fig_c, use_container_width=True)
 
-        # Кнопка PDF (вынесена отдельно)
-if st.button("📄 Скачать отчёт (PDF)"):
-    # 1. Рисуем фигуру matplotlib с графиком и сводкой
-    fig_mpl, ax = plt.subplots(figsize=(10, 6))
-    # Заголовок и метрики
-    title = f"Прогноз продаж\nМодель: {res_total['best_name']} | {data['freq_label']} | Горизонт: {data['horizon']}\n"
-    title += f"RMSE: {res_total['rmse']:,.2f}   MAPE: {res_total['mape']:.2f}%"
-    ax.set_title(title, fontsize=12, loc='center')
-    # Исторические данные
-    ax.plot(res_total['train'].index, res_total['train'].values, label='Train', color='blue')
-    ax.plot(res_total['test'].index, res_total['test'].values, label='Test', color='orange')
-    # Прогноз
-    ax.plot(res_total['future'], res_total['forecast'], label='Forecast', color='green')
-    ax.fill_between(res_total['future'], res_total['lower'], res_total['upper'],
-                    alpha=0.2, color='green')
-    # Вертикальная линия
-    split_date = res_total['test'].index[0]
-    ax.axvline(split_date, color='red', linestyle='--', label='Начало прогноза')
-    ax.legend()
-    ax.set_xlabel('Дата')
-    ax.set_ylabel('Сумма продаж')
-    plt.tight_layout()
+            # Декомпозиция
+            if len(res_total['train']) >= 2*res_total['sp']+10:
+                try:
+                    dec = seasonal_decompose(res_total['train'], model='additive', period=res_total['sp'])
+                    fd = make_subplots(rows=4, cols=1, subplot_titles=('Наблюдения','Тренд','Сезонность','Остатки'))
+                    fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.observed), 1, 1)
+                    fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.trend), 2, 1)
+                    fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.seasonal), 3, 1)
+                    fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.resid), 4, 1)
+                    fd.update_layout(height=800, showlegend=False)
+                    st.plotly_chart(fd, use_container_width=True)
+                except: pass
 
-    # 2. Сохраняем в BytesIO
-    buf = BytesIO()
-    fig_mpl.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-    buf.seek(0)
-    plt.close(fig_mpl)
+            # Остатки на тесте
+            best_res = res_total['models'][res_total['best_name']]
+            resid = res_total['test'].values - best_res['pred_test']
+            fig_r = go.Figure()
+            fig_r.add_trace(go.Scatter(x=res_total['test'].index, y=resid, name='Остатки'))
+            fig_r.add_hline(y=0, line_dash='dash', line_color='red')
+            fig_r.update_layout(title='Остатки модели (факт – прогноз) на тестовом периоде')
+            st.plotly_chart(fig_r, use_container_width=True)
 
-    # 3. Создаём PDF и вставляем картинку
-    pdf = FPDF(orientation='L', unit='mm', format='A4')
-    pdf.add_page()
-    # Сохраняем картинку во временный файл (fpdf2 требует файл)
-    import tempfile, os
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
-        tmp.write(buf.getvalue())
-        tmp_path = tmp.name
-    pdf.image(tmp_path, x=0, y=0, w=pdf.w, h=pdf.h)   # растягиваем на всю страницу
-    os.unlink(tmp_path)   # удаляем временный файл
+            # Гистограмма остатков
+            fig_hist = go.Figure(data=[go.Histogram(x=resid, nbinsx=20, histnorm='probability density')])
+            from scipy.stats import norm
+            if len(resid) > 1:
+                mu, std = np.mean(resid), np.std(resid)
+                x = np.linspace(min(resid), max(resid), 100)
+                pdf = norm.pdf(x, mu, std)
+                fig_hist.add_trace(go.Scatter(x=x, y=pdf, mode='lines', name='Норм. распр.'))
+            fig_hist.update_layout(title='Гистограмма остатков', xaxis_title='Ошибка', yaxis_title='Плотность')
+            st.plotly_chart(fig_hist, use_container_width=True)
 
-    # 4. Отдаём PDF
-    pdf_bytes = pdf.output()
-    b64 = base64.b64encode(pdf_bytes).decode()
-    href = f'<a href="data:application/pdf;base64,{b64}" download="forecast_report.pdf">Скачать PDF</a>'
-    st.markdown(href, unsafe_allow_html=True)
+            # ACF остатков
+            if len(resid) > 5:
+                acf_vals, confint = acf(resid, nlags=min(10, len(resid)//2), alpha=0.05)
+                fig_acf = go.Figure()
+                for i, val in enumerate(acf_vals):
+                    fig_acf.add_shape(type='line', x0=i-0.5, x1=i+0.5, y0=val, y1=val, line=dict(color='blue'))
+                fig_acf.add_hline(y=1.96/np.sqrt(len(resid)), line_dash='dash', line_color='red')
+                fig_acf.add_hline(y=-1.96/np.sqrt(len(resid)), line_dash='dash', line_color='red')
+                fig_acf.update_layout(title='Автокорреляция остатков (ACF)')
+                st.plotly_chart(fig_acf, use_container_width=True)
+
+            # Важность признаков
+            if res_total['best_name'] != 'Holt-Winters' and res_total['X_train_for_best'] is not None:
+                model_obj = best_res['model']
+                X_best = res_total['X_train_for_best']
+                if hasattr(model_obj, 'feature_importances_'):
+                    importances = model_obj.feature_importances_
+                    imp_df = pd.DataFrame({'Признак': X_best.columns, 'Важность': importances}).sort_values('Важность')
+                    fig_imp = go.Figure(go.Bar(x=imp_df['Важность'], y=imp_df['Признак'], orientation='h'))
+                    fig_imp.update_layout(title='Важность признаков в лучшей модели')
+                    st.plotly_chart(fig_imp, use_container_width=True)
+
+            # Корреляционная матрица
+            if res_total['X_train_for_best'] is not None:
+                X_corr = res_total['X_train_for_best'].copy()
+                y_corr = res_total['train'].loc[X_corr.index]
+                X_corr['target'] = y_corr
+                corr = X_corr.corr()
+                fig_corr = go.Figure(data=go.Heatmap(z=corr.values, x=corr.columns, y=corr.index,
+                                                     colorscale='RdBu_r', zmin=-1, zmax=1))
+                fig_corr.update_layout(title='Корреляционная матрица признаков и целевой переменной')
+                st.plotly_chart(fig_corr, use_container_width=True)
+
+        # ---------------------- Кнопка PDF (картинка) ----------------------
+        if st.button("📄 Скачать отчёт (PDF)"):
+            # Создаём фигуру с графиком и сводкой
+            fig_mpl, ax = plt.subplots(figsize=(11, 7))
+            title = f"Прогноз продаж — {res_total['best_name']}\n{data['freq_label']}, горизонт {data['horizon']}\n"
+            title += f"RMSE: {res_total['rmse']:,.2f}   MAPE: {res_total['mape']:.2f}%"
+            ax.set_title(title, fontsize=13, loc='center')
+            ax.plot(res_total['train'].index, res_total['train'].values, label='Train', color='blue')
+            ax.plot(res_total['test'].index, res_total['test'].values, label='Test', color='orange')
+            ax.plot(res_total['future'], res_total['forecast'], label='Forecast', color='green')
+            ax.fill_between(res_total['future'], res_total['lower'], res_total['upper'], alpha=0.2)
+            ax.axvline(split, color='red', linestyle='--', label='Прогноз')
+            ax.legend(); ax.set_xlabel('Дата'); ax.set_ylabel('Сумма')
+            plt.tight_layout()
+
+            buf = BytesIO()
+            fig_mpl.savefig(buf, format='png', dpi=130)
+            buf.seek(0)
+            plt.close(fig_mpl)
+
+            # PDF
+            pdf = FPDF(orientation='L', unit='mm', format='A4')
+            pdf.add_page()
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                tmp.write(buf.getvalue())
+                tmp_path = tmp.name
+            pdf.image(tmp_path, x=0, y=0, w=pdf.w, h=pdf.h)
+            os.unlink(tmp_path)
+
+            pdf_bytes = pdf.output()
+            b64 = base64.b64encode(pdf_bytes).decode()
+            href = f'<a href="data:application/pdf;base64,{b64}" download="forecast_report.pdf">Скачать PDF</a>'
+            st.markdown(href, unsafe_allow_html=True)
