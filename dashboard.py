@@ -1,7 +1,7 @@
 import streamlit as st, pandas as pd, numpy as np, plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from io import BytesIO
-import base64, time, gc, os, warnings
+import base64, time, gc, os, tempfile, warnings
 warnings.filterwarnings('ignore')
 
 import matplotlib
@@ -20,6 +20,8 @@ try:
     HAS_XGB = True
 except ImportError:
     HAS_XGB = False
+
+from fpdf import FPDF
 
 # ---------------------------- Праздники РФ ----------------------------
 RUSSIAN_HOLIDAYS = {
@@ -173,7 +175,6 @@ def process_target(df_f, target_col, freq, horizon):
                                           initialization_method='estimated').fit()
         forecast = full_model.forecast(horizon)
     else:
-        # ML
         X_full = pd.DataFrame(index=full_ts.index)
         for lag in range(1, lags+1):
             X_full[f'lag_{lag}'] = full_ts.shift(lag)
@@ -226,23 +227,32 @@ st.title("📈 Интеллектуальная модель прогнозир�
 st.markdown("Загрузите CSV-файл с продажами и получите прогноз с автоматическим выбором лучшей модели.")
 
 with st.sidebar:
+    st.markdown("## ⚙️ Требования к данным")
     st.info("**Обязательные столбцы:** date, time, category, product, quantity, price, total\n\n"
             "**Формат даты:** любой\n"
-            "**Кодировка:** авто или вручную")
+            "**Кодировка:** определяется автоматически")
+    st.markdown("---")
+    st.markdown("## 🎉 Учитываемые праздники РФ")
+    st.markdown("""
+    <div style='background:#fff3cd;padding:0.8rem;border-radius:10px;font-size:0.9rem;'>
+    Новогодние каникулы (1–8 января), 23 февраля, 8 марта, 1 мая, 9 мая, 12 июня, 4 ноября.
+    </div>
+    """, unsafe_allow_html=True)
+    st.markdown("*Праздники используются для улучшения точности недельных и дневных прогнозов.*")
 
 uploaded = st.file_uploader("📂 Загрузите CSV-файл (до 150 МБ)", type="csv")
 if uploaded:
     if uploaded.size > 150*1024*1024:
         st.error("❌ Файл > 150 МБ"); st.stop()
 
-    enc = st.selectbox("Кодировка", ['auto','utf-8','cp1251'])
-    if enc == 'auto':
-        raw = uploaded.read()
-        try:
-            import chardet
-            enc = chardet.detect(raw)['encoding'] or 'utf-8'
-        except: enc = 'utf-8'
-        uploaded.seek(0)
+    # Автоопределение кодировки
+    raw = uploaded.read()
+    try:
+        import chardet
+        enc = chardet.detect(raw)['encoding'] or 'utf-8'
+    except ImportError:
+        enc = 'utf-8'
+    uploaded.seek(0)
 
     try:
         df = pd.read_csv(uploaded, encoding=enc,
@@ -270,7 +280,7 @@ if uploaded:
     if df.empty:
         st.error("Нет данных после очистки"); st.stop()
 
-    st.success(f"✅ {len(df)} записей загружено")
+    st.success(f"✅ Загружено {len(df)} записей")
     with st.expander("🔍 Первые 10 строк"):
         st.dataframe(df.head(10))
 
@@ -285,7 +295,6 @@ if uploaded:
     horizon = st.slider("Горизонт (периодов)", 1, 52, 5)
     show_advanced = st.checkbox("📊 Расширенная аналитика (включая корреляции, важность признаков, ACF)")
 
-    # Фильтрация
     df_f = df.copy()
     if selected_cat != 'Все': df_f = df_f[df_f['category']==selected_cat]
     if selected_prod and selected_prod != 'Все': df_f = df_f[df_f['product']==selected_prod]
@@ -308,138 +317,180 @@ if uploaded:
 
             progress.progress(90)
             status.text("Формирование результатов...")
+            time.sleep(0.5)
 
-            # ---------- Вывод total ----------
-            st.subheader(f"🏆 Результаты прогнозирования (сумма продаж) — модель: {res_total['best_name']}")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("RMSE", f"{res_total['rmse']:,.2f}")
-            col2.metric("MAPE", f"{res_total['mape']:.2f}%")
-            other_total = [m for m in res_total['models'] if m != res_total['best_name']]
-            if other_total:
-                best_other = min(other_total, key=lambda x: res_total['models'][x]['mape'])
-                col3.metric(f"Альтернатива: {best_other}", f"MAPE {res_total['models'][best_other]['mape']:.2f}%")
-
-            # График total
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=res_total['train'].index, y=res_total['train'].values, name='Обучающие', line=dict(color='blue')))
-            fig.add_trace(go.Scatter(x=res_total['test'].index, y=res_total['test'].values, name='Тестовые', line=dict(color='orange')))
-            fig.add_trace(go.Scatter(x=res_total['future'], y=res_total['forecast'], name='Прогноз', line=dict(color='green')))
-            fig.add_trace(go.Scatter(x=np.concatenate([res_total['future'], res_total['future'][::-1]]),
-                                     y=np.concatenate([res_total['upper'], res_total['lower'][::-1]]),
-                                     fill='toself', fillcolor='rgba(44,160,44,0.2)',
-                                     line=dict(color='rgba(255,255,255,0)'), name='90% CI'))
-            split = res_total['test'].index[0]
-            fig.add_shape(type='line', x0=split, x1=split, y0=0, y1=1, yref='paper',
-                          line=dict(color='red', dash='dash'))
-            fig.add_annotation(x=split, y=1, yref='paper', text='Прогноз', showarrow=False,
-                               xanchor='left', textangle=-90)
-            fig.update_layout(title=f'Прогноз суммы продаж ({res_total["best_name"]})', xaxis_title='Дата', yaxis_title='Сумма')
-            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
-
-            # Таблица прогнозов
-            st.subheader("📋 Прогнозные значения")
-            table_df = pd.DataFrame({
-                'Дата': res_total['future'].strftime('%d-%m-%Y'),
-                'Прогноз суммы': res_total['forecast'].round(2),
-                'Нижняя граница (90%)': res_total['lower'].round(2),
-                'Верхняя граница (90%)': res_total['upper'].round(2)
-            })
-            if res_qty is not None:
-                table_df['Прогноз количества'] = res_qty['forecast'].round(0).astype(int)
-                st.caption("Широкий доверительный интервал для суммы объясняется волатильностью данных: чем сильнее колебания продаж, тем больше неопределённость прогноза.")
-            st.dataframe(table_df, use_container_width=True)
-
-            # ---------- Расширенная аналитика ----------
-            if show_advanced:
-                st.subheader("📊 Расширенная аналитика (сумма продаж)")
-
-                # 1. Сравнение моделей
-                comp = pd.DataFrame([
-                    {'Модель':n, 'RMSE':d['rmse'], 'MAPE':d['mape']} for n,d in res_total['models'].items()
-                ]).sort_values('MAPE')
-                st.dataframe(comp, use_container_width=True)
-                fig_c = make_subplots(rows=1, cols=2, subplot_titles=('RMSE','MAPE'))
-                fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['RMSE'], name='RMSE'), 1, 1)
-                fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['MAPE'], name='MAPE'), 1, 2)
-                fig_c.update_layout(showlegend=False)
-                st.plotly_chart(fig_c, use_container_width=True)
-
-                # 2. Сезонная декомпозиция
-                if len(res_total['train']) >= 2*res_total['sp']+10:
-                    try:
-                        dec = seasonal_decompose(res_total['train'], model='additive', period=res_total['sp'])
-                        fd = make_subplots(rows=4, cols=1, subplot_titles=('Наблюдения','Тренд','Сезонность','Остатки'))
-                        fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.observed), 1, 1)
-                        fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.trend), 2, 1)
-                        fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.seasonal), 3, 1)
-                        fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.resid), 4, 1)
-                        fd.update_layout(height=800, showlegend=False)
-                        st.plotly_chart(fd, use_container_width=True)
-                    except: pass
-
-                # 3. Остатки на тесте
-                best_res = res_total['models'][res_total['best_name']]
-                resid = res_total['test'].values - best_res['pred_test']
-                fig_r = go.Figure()
-                fig_r.add_trace(go.Scatter(x=res_total['test'].index, y=resid, name='Остатки'))
-                fig_r.add_hline(y=0, line_dash='dash', line_color='red')
-                fig_r.update_layout(title='Остатки модели (факт – прогноз) на тестовом периоде')
-                st.plotly_chart(fig_r, use_container_width=True)
-                st.caption("Остатки показывают разницу между реальными значениями и прогнозом. Если они случайно разбросаны вокруг нуля — модель хорошая.")
-
-                # 4. Гистограмма остатков
-                fig_hist = go.Figure()
-                fig_hist.add_trace(go.Histogram(x=resid, nbinsx=20, name='Остатки', histnorm='probability density'))
-                from scipy.stats import norm
-                if len(resid) > 1:
-                    mu, std = np.mean(resid), np.std(resid)
-                    x = np.linspace(min(resid), max(resid), 100)
-                    pdf = norm.pdf(x, mu, std)
-                    fig_hist.add_trace(go.Scatter(x=x, y=pdf, mode='lines', name='Норм. распр.'))
-                fig_hist.update_layout(title='Гистограмма остатков', xaxis_title='Ошибка', yaxis_title='Плотность')
-                st.plotly_chart(fig_hist, use_container_width=True)
-
-                # 5. Автокорреляция остатков (ACF)
-                if len(resid) > 5:
-                    acf_vals, confint = acf(resid, nlags=min(10, len(resid)//2), alpha=0.05)
-                    fig_acf = go.Figure()
-                    for i, val in enumerate(acf_vals):
-                        fig_acf.add_shape(type='line', x0=i-0.5, x1=i+0.5, y0=val, y1=val, line=dict(color='blue'))
-                    fig_acf.add_hline(y=1.96/np.sqrt(len(resid)), line_dash='dash', line_color='red')
-                    fig_acf.add_hline(y=-1.96/np.sqrt(len(resid)), line_dash='dash', line_color='red')
-                    fig_acf.update_layout(title='Автокорреляция остатков (ACF)',
-                                          xaxis_title='Лаг', yaxis_title='ACF')
-                    st.plotly_chart(fig_acf, use_container_width=True)
-                    st.caption("Значимые пики ACF указывают на оставшуюся структуру в ошибках.")
-
-                # 6. Важность признаков (если лучшая модель ML)
-                if res_total['best_name'] != 'Holt-Winters' and res_total['X_train_for_best'] is not None:
-                    model_obj = best_res['model']
-                    X_best = res_total['X_train_for_best']
-                    if hasattr(model_obj, 'feature_importances_'):
-                        importances = model_obj.feature_importances_
-                        feat_names = X_best.columns
-                        imp_df = pd.DataFrame({'Признак': feat_names, 'Важность': importances}).sort_values('Важность', ascending=True)
-                        fig_imp = go.Figure(go.Bar(x=imp_df['Важность'], y=imp_df['Признак'], orientation='h'))
-                        fig_imp.update_layout(title='Важность признаков в лучшей модели', xaxis_title='Важность', yaxis_title='')
-                        st.plotly_chart(fig_imp, use_container_width=True)
-
-                # 7. Корреляционная матрица лаговых признаков
-                if res_total['X_train_for_best'] is not None:
-                    X_corr = res_total['X_train_for_best'].copy()
-                    y_corr = res_total['train'].loc[X_corr.index]
-                    X_corr['target'] = y_corr
-                    corr = X_corr.corr()
-                    fig_corr = go.Figure(data=go.Heatmap(z=corr.values, x=corr.columns, y=corr.index,
-                                                         colorscale='RdBu_r', zmin=-1, zmax=1))
-                    fig_corr.update_layout(title='Корреляционная матрица признаков и целевой переменной')
-                    st.plotly_chart(fig_corr, use_container_width=True)
-                    st.caption("Матрица показывает взаимосвязи между лагами, временными метками и продажами. Высокие значения (ближе к ±1) – сильная связь.")
-
-            st.caption(f"⏱️ Прогноз построен за {time.time()-start:.1f} сек.")
+            st.session_state['forecast'] = {
+                'total': res_total,
+                'qty': res_qty,
+                'freq_label': freq_label,
+                'horizon': horizon,
+                'selected_cat': selected_cat,
+                'selected_prod': selected_prod,
+                'freq': freq
+            }
 
         except Exception as e:
             st.error(f"❌ Ошибка: {e}")
         finally:
             del df_f
             gc.collect()
+
+    # ---------- Отображение результатов (из сессии) ----------
+    if 'forecast' in st.session_state:
+        data = st.session_state['forecast']
+        res_total = data['total']
+        res_qty = data['qty']
+
+        st.subheader(f"🏆 Результаты прогнозирования (сумма продаж) — модель: {res_total['best_name']}")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("RMSE", f"{res_total['rmse']:,.2f}")
+        col2.metric("MAPE", f"{res_total['mape']:.2f}%")
+        other_total = [m for m in res_total['models'] if m != res_total['best_name']]
+        if other_total:
+            best_other = min(other_total, key=lambda x: res_total['models'][x]['mape'])
+            col3.metric(f"Альтернатива: {best_other}", f"MAPE {res_total['models'][best_other]['mape']:.2f}%")
+
+        # График
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=res_total['train'].index, y=res_total['train'].values, name='Обучающие', line=dict(color='blue')))
+        fig.add_trace(go.Scatter(x=res_total['test'].index, y=res_total['test'].values, name='Тестовые', line=dict(color='orange')))
+        fig.add_trace(go.Scatter(x=res_total['future'], y=res_total['forecast'], name='Прогноз', line=dict(color='green')))
+        fig.add_trace(go.Scatter(x=np.concatenate([res_total['future'], res_total['future'][::-1]]),
+                                 y=np.concatenate([res_total['upper'], res_total['lower'][::-1]]),
+                                 fill='toself', fillcolor='rgba(44,160,44,0.2)',
+                                 line=dict(color='rgba(255,255,255,0)'), name='90% CI'))
+        split = res_total['test'].index[0]
+        fig.add_shape(type='line', x0=split, x1=split, y0=0, y1=1, yref='paper',
+                      line=dict(color='red', dash='dash'))
+        fig.add_annotation(x=split, y=1, yref='paper', text='Прогноз', showarrow=False,
+                           xanchor='left', textangle=-90)
+        fig.update_layout(title=f'Прогноз суммы продаж ({res_total["best_name"]})', xaxis_title='Дата', yaxis_title='Сумма')
+        st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+
+        # Таблица прогнозов
+        st.subheader("📋 Прогнозные значения")
+        table_df = pd.DataFrame({
+            'Дата': res_total['future'].strftime('%d-%m-%Y'),
+            'Прогноз суммы': res_total['forecast'].round(2),
+            'Нижняя граница (90%)': res_total['lower'].round(2),
+            'Верхняя граница (90%)': res_total['upper'].round(2)
+        })
+        if res_qty is not None:
+            table_df['Прогноз количества'] = res_qty['forecast'].round(0).astype(int)
+            st.caption("Широкий доверительный интервал для суммы объясняется волатильностью данных: чем сильнее колебания продаж, тем больше неопределённость прогноза.")
+        st.dataframe(table_df, use_container_width=True)
+
+        # Расширенная аналитика
+        if show_advanced:
+            st.subheader("📊 Расширенная аналитика (сумма продаж)")
+
+            # Сравнение моделей
+            comp = pd.DataFrame([
+                {'Модель':n, 'RMSE':d['rmse'], 'MAPE':d['mape']} for n,d in res_total['models'].items()
+            ]).sort_values('MAPE')
+            st.dataframe(comp, use_container_width=True)
+            fig_c = make_subplots(rows=1, cols=2, subplot_titles=('RMSE','MAPE'))
+            fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['RMSE'], name='RMSE'), 1, 1)
+            fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['MAPE'], name='MAPE'), 1, 2)
+            fig_c.update_layout(showlegend=False)
+            st.plotly_chart(fig_c, use_container_width=True)
+
+            # Сезонная декомпозиция
+            if len(res_total['train']) >= 2*res_total['sp']+10:
+                try:
+                    dec = seasonal_decompose(res_total['train'], model='additive', period=res_total['sp'])
+                    fd = make_subplots(rows=4, cols=1, subplot_titles=('Наблюдения','Тренд','Сезонность','Остатки'))
+                    fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.observed), 1, 1)
+                    fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.trend), 2, 1)
+                    fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.seasonal), 3, 1)
+                    fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.resid), 4, 1)
+                    fd.update_layout(height=800, showlegend=False)
+                    st.plotly_chart(fd, use_container_width=True)
+                except: pass
+
+            # Остатки на тесте
+            best_res = res_total['models'][res_total['best_name']]
+            resid = res_total['test'].values - best_res['pred_test']
+            fig_r = go.Figure()
+            fig_r.add_trace(go.Scatter(x=res_total['test'].index, y=resid, name='Остатки'))
+            fig_r.add_hline(y=0, line_dash='dash', line_color='red')
+            fig_r.update_layout(title='Остатки модели (факт – прогноз) на тестовом периоде')
+            st.plotly_chart(fig_r, use_container_width=True)
+            st.caption("Остатки показывают разницу между реальными значениями и прогнозом.")
+
+            # Гистограмма остатков
+            fig_hist = go.Figure()
+            fig_hist.add_trace(go.Histogram(x=resid, nbinsx=20, name='Остатки', histnorm='probability density'))
+            from scipy.stats import norm
+            if len(resid) > 1:
+                mu, std = np.mean(resid), np.std(resid)
+                x = np.linspace(min(resid), max(resid), 100)
+                pdf = norm.pdf(x, mu, std)
+                fig_hist.add_trace(go.Scatter(x=x, y=pdf, mode='lines', name='Норм. распр.'))
+            fig_hist.update_layout(title='Гистограмма остатков', xaxis_title='Ошибка', yaxis_title='Плотность')
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+            # ACF остатков
+            if len(resid) > 5:
+                acf_vals, confint = acf(resid, nlags=min(10, len(resid)//2), alpha=0.05)
+                fig_acf = go.Figure()
+                for i, val in enumerate(acf_vals):
+                    fig_acf.add_shape(type='line', x0=i-0.5, x1=i+0.5, y0=val, y1=val, line=dict(color='blue'))
+                fig_acf.add_hline(y=1.96/np.sqrt(len(resid)), line_dash='dash', line_color='red')
+                fig_acf.add_hline(y=-1.96/np.sqrt(len(resid)), line_dash='dash', line_color='red')
+                fig_acf.update_layout(title='Автокорреляция остатков (ACF)', xaxis_title='Лаг', yaxis_title='ACF')
+                st.plotly_chart(fig_acf, use_container_width=True)
+
+            # Важность признаков
+            if res_total['best_name'] != 'Holt-Winters' and res_total['X_train_for_best'] is not None:
+                model_obj = best_res['model']
+                X_best = res_total['X_train_for_best']
+                if hasattr(model_obj, 'feature_importances_'):
+                    importances = model_obj.feature_importances_
+                    imp_df = pd.DataFrame({'Признак': X_best.columns, 'Важность': importances}).sort_values('Важность')
+                    fig_imp = go.Figure(go.Bar(x=imp_df['Важность'], y=imp_df['Признак'], orientation='h'))
+                    fig_imp.update_layout(title='Важность признаков в лучшей модели')
+                    st.plotly_chart(fig_imp, use_container_width=True)
+
+            # Корреляционная матрица
+            if res_total['X_train_for_best'] is not None:
+                X_corr = res_total['X_train_for_best'].copy()
+                y_corr = res_total['train'].loc[X_corr.index]
+                X_corr['target'] = y_corr
+                corr = X_corr.corr()
+                fig_corr = go.Figure(data=go.Heatmap(z=corr.values, x=corr.columns, y=corr.index,
+                                                     colorscale='RdBu_r', zmin=-1, zmax=1))
+                fig_corr.update_layout(title='Корреляционная матрица признаков и целевой переменной')
+                st.plotly_chart(fig_corr, use_container_width=True)
+
+        # Кнопка PDF
+        if st.button("📄 Скачать отчёт (PDF)"):
+            fig_mpl, ax = plt.subplots(figsize=(11, 7))
+            title = f"Прогноз продаж — {res_total['best_name']}\n{data['freq_label']}, горизонт {data['horizon']}\n"
+            title += f"RMSE: {res_total['rmse']:,.2f}   MAPE: {res_total['mape']:.2f}%"
+            ax.set_title(title, fontsize=13, loc='center')
+            ax.plot(res_total['train'].index, res_total['train'].values, label='Train', color='blue')
+            ax.plot(res_total['test'].index, res_total['test'].values, label='Test', color='orange')
+            ax.plot(res_total['future'], res_total['forecast'], label='Forecast', color='green')
+            ax.fill_between(res_total['future'], res_total['lower'], res_total['upper'], alpha=0.2)
+            ax.axvline(split, color='red', linestyle='--', label='Прогноз')
+            ax.legend(); ax.set_xlabel('Дата'); ax.set_ylabel('Сумма')
+            plt.tight_layout()
+
+            buf = BytesIO()
+            fig_mpl.savefig(buf, format='png', dpi=130)
+            buf.seek(0)
+            plt.close(fig_mpl)
+
+            pdf = FPDF(orientation='L', unit='mm', format='A4')
+            pdf.add_page()
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                tmp.write(buf.getvalue())
+                tmp_path = tmp.name
+            pdf.image(tmp_path, x=0, y=0, w=pdf.w, h=pdf.h)
+            os.unlink(tmp_path)
+
+            pdf_bytes = pdf.output()
+            b64 = base64.b64encode(pdf_bytes).decode()
+            href = f'<a href="data:application/pdf;base64,{b64}" download="forecast_report.pdf">Скачать PDF</a>'
+            st.markdown(href, unsafe_allow_html=True)
