@@ -371,27 +371,8 @@ if uploaded:
                         st.plotly_chart(fd, use_container_width=True)
                     except: pass
 
-                # 3. Остатки на тесте
                 best_res = res_total['models'][res_total['best_name']]
                 resid = res_total['test'].values - best_res['pred_test']
-                fig_r = go.Figure()
-                fig_r.add_trace(go.Scatter(x=res_total['test'].index, y=resid, name='Остатки'))
-                fig_r.add_hline(y=0, line_dash='dash', line_color='red')
-                fig_r.update_layout(title='Остатки модели (факт – прогноз) на тестовом периоде')
-                st.plotly_chart(fig_r, use_container_width=True)
-                st.caption("Остатки показывают разницу между реальными значениями и прогнозом. Если они случайно разбросаны вокруг нуля — модель хорошая.")
-
-                # 4. Гистограмма остатков
-                fig_hist = go.Figure()
-                fig_hist.add_trace(go.Histogram(x=resid, nbinsx=20, name='Остатки', histnorm='probability density'))
-                from scipy.stats import norm
-                if len(resid) > 1:
-                    mu, std = np.mean(resid), np.std(resid)
-                    x = np.linspace(min(resid), max(resid), 100)
-                    pdf = norm.pdf(x, mu, std)
-                    fig_hist.add_trace(go.Scatter(x=x, y=pdf, mode='lines', name='Норм. распр.'))
-                fig_hist.update_layout(title='Гистограмма остатков', xaxis_title='Ошибка', yaxis_title='Плотность')
-                st.plotly_chart(fig_hist, use_container_width=True)
 
                 # 5. Автокорреляция остатков (ACF)
                 if len(resid) > 5:
