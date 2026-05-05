@@ -271,7 +271,13 @@ if uploaded:
     selected_cat = col2.selectbox("Категория", cats)
     prods = ['Все'] + (sorted(df[df['category']==selected_cat]['product'].unique()) if selected_cat!='Все' else [])
     selected_prod = col3.selectbox("Товар", prods) if prods else None
-    horizon = st.slider("Горизонт (периодов)", 1, 52, 5)
+    horizon = st.number_input(
+        "Горизонт (периодов)",
+        min_value=1,
+        max_value=52,
+        value=5,
+        help="При выборе более 12 месяцев (52 недель) точность прогноза может снижаться."
+    )
     show_advanced = st.checkbox("📊 Расширенная аналитика (включая корреляции, важность признаков, ACF)")
 
     # Фильтрация
