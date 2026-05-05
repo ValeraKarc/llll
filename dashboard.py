@@ -378,6 +378,7 @@ if uploaded:
 
         # Кнопка PDF (вынесена отдельно)
         if st.button("📄 Скачать отчёт (PDF)"):
+            import tempfile
             pdf = FPDF()
             pdf.add_page()
             pdf.set_font("Arial", size=12)
@@ -404,19 +405,20 @@ if uploaded:
                 pdf.cell(40, 8, f"{res_total['upper'][i]:,.2f}", 1)
                 pdf.ln()
 
-            fig_mpl, ax = plt.subplots(figsize=(8,4))
-            ax.plot(res_total['train'].index, res_total['train'].values, label='Train')
-            ax.plot(res_total['test'].index, res_total['test'].values, label='Test')
-            ax.plot(res_total['future'], res_total['forecast'], label='Forecast')
-            ax.fill_between(res_total['future'], res_total['lower'], res_total['upper'], alpha=0.2)
-            ax.axvline(split, color='red', linestyle='--')
-            ax.legend()
-            buf = BytesIO()
-            fig_mpl.savefig(buf, format='png', dpi=100)
-            buf.seek(0)
-            plt.close(fig_mpl)
-            pdf.image(buf, x=10, w=190)
-            buf.close()
+            # Сохраняем график во временный файл
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmpfile:
+                fig_mpl, ax = plt.subplots(figsize=(8,4))
+                ax.plot(res_total['train'].index, res_total['train'].values, label='Train')
+                ax.plot(res_total['test'].index, res_total['test'].values, label='Test')
+                ax.plot(res_total['future'], res_total['forecast'], label='Forecast')
+                ax.fill_between(res_total['future'], res_total['lower'], res_total['upper'], alpha=0.2)
+                ax.axvline(split, color='red', linestyle='--')
+                ax.legend()
+                fig_mpl.savefig(tmpfile.name, format='png', dpi=100)
+                plt.close(fig_mpl)
+                # Вставляем изображение
+                pdf.image(tmpfile.name, x=10, w=190)
+                # Файл будет автоматически удалён после выхода из блока with, но pdf уже сгенерирован
 
             pdf_bytes = pdf.output()
             b64 = base64.b64encode(pdf_bytes).decode()
