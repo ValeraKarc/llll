@@ -235,14 +235,13 @@ if uploaded:
     if uploaded.size > 150*1024*1024:
         st.error("❌ Файл > 150 МБ"); st.stop()
 
-    enc = st.selectbox("Кодировка", ['auto','utf-8','cp1251'])
-    if enc == 'auto':
-        raw = uploaded.read()
-        try:
-            import chardet
-            enc = chardet.detect(raw)['encoding'] or 'utf-8'
-        except: enc = 'utf-8'
-        uploaded.seek(0)
+    raw = uploaded.read()
+    try:
+        import chardet
+        enc = chardet.detect(raw)['encoding'] or 'utf-8'
+    except ImportError:
+        enc = 'utf-8'
+    uploaded.seek(0)
 
     try:
         df = pd.read_csv(uploaded, encoding=enc,
