@@ -138,7 +138,7 @@ def process_target(df_f, target_col, freq, horizon):
 
     # XGBoost
     if HAS_XGB:
-        xgb = XGBRegenerator(n_estimators=80, max_depth=6, learning_rate=0.05,
+        xgb = XGBRegressor(n_estimators=80, max_depth=6, learning_rate=0.05,
                            random_state=42, verbosity=0, n_jobs=-1)
         pred_xgb, xgb_model, X_xgb = train_ml_model(xgb, train, test.index, lags, freq, holiday_series)
         if pred_xgb is not None:
