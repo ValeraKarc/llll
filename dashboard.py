@@ -21,6 +21,8 @@ try:
 except ImportError:
     HAS_XGB = False
 
+from fpdf import FPDF
+
 # ---------------------------- Праздники РФ ----------------------------
 RUSSIAN_HOLIDAYS = {
     '2020-01-01','2020-01-02','2020-01-03','2020-01-04','2020-01-05','2020-01-06','2020-01-07','2020-01-08',
@@ -435,6 +437,53 @@ if uploaded:
                     fig_corr.update_layout(title='Корреляционная матрица признаков и целевой переменной')
                     st.plotly_chart(fig_corr, use_container_width=True)
                     st.caption("Матрица показывает взаимосвязи между лагами, временными метками и продажами. Высокие значения (ближе к ±1) – сильная связь.")
+
+            # ---------- Кнопка PDF ----------
+            if st.button("📄 Скачать отчёт (PDF)"):
+                pdf = FPDF()
+                pdf.add_page()
+                pdf.set_font("Arial", size=12)
+                pdf.cell(0, 10, "Forecast Report", ln=1, align='C')
+                pdf.ln(10)
+                pdf.set_font("Arial", size=10)
+                pdf.cell(0, 10, f"Model: {res_total['best_name']}", ln=1)
+                pdf.cell(0, 10, f"Period: {freq_label}, Horizon: {horizon}", ln=1)
+                pdf.cell(0, 10, f"RMSE: {res_total['rmse']:,.2f}, MAPE: {res_total['mape']:.2f}%", ln=1)
+                if res_qty is not None:
+                    pdf.cell(0, 10, "Quantity forecast included", ln=1)
+                pdf.ln(5)
+                # Table
+                pdf.set_font("Arial", 'B', 9)
+                pdf.cell(50, 8, "Date", 1)
+                pdf.cell(40, 8, "Forecast", 1)
+                pdf.cell(40, 8, "Lower 90%", 1)
+                pdf.cell(40, 8, "Upper 90%", 1)
+                pdf.ln()
+                pdf.set_font("Arial", size=9)
+                for i, dt in enumerate(res_total['future']):
+                    pdf.cell(50, 8, dt.strftime('%d-%m-%Y'), 1)
+                    pdf.cell(40, 8, f"{res_total['forecast'][i]:,.2f}", 1)
+                    pdf.cell(40, 8, f"{res_total['lower'][i]:,.2f}", 1)
+                    pdf.cell(40, 8, f"{res_total['upper'][i]:,.2f}", 1)
+                    pdf.ln()
+                # Graph
+                fig_mpl, ax = plt.subplots(figsize=(8,4))
+                ax.plot(res_total['train'].index, res_total['train'].values, label='Train')
+                ax.plot(res_total['test'].index, res_total['test'].values, label='Test')
+                ax.plot(res_total['future'], res_total['forecast'], label='Forecast')
+                ax.fill_between(res_total['future'], res_total['lower'], res_total['upper'], alpha=0.2)
+                ax.axvline(split, color='red', linestyle='--')
+                ax.legend()
+                buf = BytesIO()
+                fig_mpl.savefig(buf, format='png', dpi=100)
+                buf.seek(0)
+                plt.close(fig_mpl)
+                pdf.image(buf, x=10, w=190)
+                buf.close()
+                pdf_bytes = pdf.output()
+                b64 = base64.b64encode(pdf_bytes).decode()
+                href = f'<a href="data:application/pdf;base64,{b64}" download="forecast_report.pdf">Click to download PDF</a>'
+                st.markdown(href, unsafe_allow_html=True)
 
             st.caption(f"⏱️ Прогноз построен за {time.time()-start:.1f} сек.")
 
