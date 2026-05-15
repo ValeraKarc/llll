@@ -1,13 +1,7 @@
 import streamlit as st, pandas as pd, numpy as np, plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from io import BytesIO
-import base64, time, gc, os, warnings
+import time, gc, warnings
 warnings.filterwarnings('ignore')
-
-import matplotlib
-if 'DISPLAY' not in os.environ:
-    matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
@@ -21,7 +15,6 @@ try:
 except ImportError:
     HAS_XGB = False
 
-# ---------------------------- Праздники РФ ----------------------------
 HOLIDAY_DATES = {
     (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7), (1, 8),  # Новогодние каникулы
     (2, 23),  # День защитника Отечества
@@ -34,14 +27,12 @@ HOLIDAY_DATES = {
 def is_holiday(dt):
     return (dt.month, dt.day) in HOLIDAY_DATES
 
-# ---------------------------- Метрика ----------------------------
 def mape(y_true, y_pred):
     y_true, y_pred = np.array(y_true, dtype=np.float64), np.array(y_pred, dtype=np.float64)
     mask = y_true != 0
     if np.sum(mask) == 0: return np.inf
     return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask]))
 
-# ---------------------------- Очистка выбросов ----------------------------
 def remove_outliers(series):
     q1 = series.quantile(0.25)
     q3 = series.quantile(0.75)
@@ -52,7 +43,6 @@ def remove_outliers(series):
     clean[(clean < lower) | (clean > upper)] = np.nan
     return clean.interpolate().bfill().ffill()
 
-# ---------------------------- Обучение ML ----------------------------
 def train_ml_model(model, train_series, test_index, lags, freq, holiday_series=None):
     X = pd.DataFrame(index=train_series.index)
     for lag in range(1, lags+1):
@@ -79,7 +69,6 @@ def train_ml_model(model, train_series, test_index, lags, freq, holiday_series=N
         hist.append(pred)
     return np.array(test_pred), model, X
 
-# ---------------------------- Обработка одного ряда ----------------------------
 def process_target(df_f, target_col, freq, horizon):
     ts = df_f.set_index('datetime')[target_col].astype(np.float64).resample(freq).sum()
     ts = ts.asfreq(freq).interpolate().bfill().ffill().dropna()
@@ -93,7 +82,7 @@ def process_target(df_f, target_col, freq, horizon):
     lags = 24 if freq == 'W-MON' else min(6, len(train)//2)
 
     holiday_series = None
-    if freq in ('D','W-MON'):
+    if freq == 'W-MON':
         holiday_series = pd.Series(
             [1 if is_holiday(d) else 0 for d in train.index],
             index=train.index, dtype=np.int8
@@ -151,10 +140,8 @@ def process_target(df_f, target_col, freq, horizon):
     full_ts = pd.concat([train, test])
     if freq == 'W-MON':
         start_future = full_ts.index[-1] + pd.DateOffset(weeks=1)
-    elif freq == 'MS':
-        start_future = full_ts.index[-1] + pd.DateOffset(months=1)
     else:
-        start_future = full_ts.index[-1] + pd.Timedelta(days=1)
+        start_future = full_ts.index[-1] + pd.DateOffset(months=1)
     future = pd.date_range(start=start_future, periods=horizon, freq=freq)
 
     if best_name == 'Holt-Winters':
@@ -180,7 +167,7 @@ def process_target(df_f, target_col, freq, horizon):
                                       random_state=42, verbosity=0, n_jobs=-1)
         full_model.fit(X_full, y_full)
         future_hol = None
-        if freq in ('D','W-MON'):
+        if freq == 'W-MON':
             future_hol = [1 if is_holiday(d) else 0 for d in future]
         hist = y_full.iloc[-lags:].tolist()
         forecast = []
@@ -210,7 +197,6 @@ def process_target(df_f, target_col, freq, horizon):
         'pred_test': best['pred_test']
     }
 
-# ---------------------------- Интерфейс ----------------------------
 st.set_page_config(page_title="Интеллектуальная модель прогнозирования продаж", layout="wide")
 st.title("📈 Интеллектуальная модель прогнозирования продаж")
 st.markdown("Загрузите CSV-файл с продажами и получите прогноз с автоматическим выбором лучшей модели.")
