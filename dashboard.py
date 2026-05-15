@@ -375,7 +375,7 @@ if uploaded:
                     st.plotly_chart(fig_acf, use_container_width=True)
                     st.caption("Значимые пики ACF указывают на оставшуюся структуру в ошибках.")
 
-                # 6. Важность признаков (если лучшая модель ML)
+                # 6. Важность признаков (только для ML-моделей: Random Forest / XGBoost)
                 if res_total['best_name'] != 'Holt-Winters' and res_total['X_train_for_best'] is not None:
                     model_obj = best_res['model']
                     X_best = res_total['X_train_for_best']
@@ -387,8 +387,8 @@ if uploaded:
                         fig_imp.update_layout(title='Важность признаков в лучшей модели', xaxis_title='Важность', yaxis_title='')
                         st.plotly_chart(fig_imp, use_container_width=True)
 
-                # 7. Корреляционная матрица лаговых признаков
-                if res_total['X_train_for_best'] is not None:
+                # 7. Корреляционная матрица лаговых признаков (только для ML-моделей)
+                if res_total['best_name'] != 'Holt-Winters' and res_total['X_train_for_best'] is not None:
                     X_corr = res_total['X_train_for_best'].copy()
                     y_corr = res_total['train'].loc[X_corr.index]
                     X_corr['target'] = y_corr
