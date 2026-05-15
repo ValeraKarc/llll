@@ -15,7 +15,8 @@ try:
 except ImportError:
     HAS_XGB = False
 
-HOLIDAY_DATES = {
+# Базовые праздники РФ (можно расширить через интерфейс)
+BASE_HOLIDAYS = {
     (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7), (1, 8),  # Новогодние каникулы
     (2, 23),  # День защитника Отечества
     (3, 8),   # Международный женский день
@@ -24,8 +25,36 @@ HOLIDAY_DATES = {
     (6, 12),  # День России
     (11, 4),  # День народного единства
 }
-def is_holiday(dt):
-    return (dt.month, dt.day) in HOLIDAY_DATES
+
+def parse_custom_holidays(text):
+    """Парсит пользовательские праздники из текста формата 'ДД.ММ' или 'ДД.MM'.
+    Пример: '31.12, 08.03, 09.05' -> {(12,31), (3,8), (5,9)}
+    """
+    if not text or not text.strip():
+        return set()
+    holidays = set()
+    for item in text.replace(';', ',').split(','):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            # Поддержка форматов: ДД.ММ, ДД/MM, ДД-MM
+            item = item.replace('/', '.').replace('-', '.')
+            day, month = map(int, item.split('.'))
+            if 1 <= day <= 31 and 1 <= month <= 12:
+                holidays.add((month, day))
+        except (ValueError, IndexError):
+            continue
+    return holidays
+
+def is_holiday(dt, custom_holidays=None):
+    """Проверяет, является ли дата праздником (базовым или пользовательским)."""
+    date_key = (dt.month, dt.day)
+    if date_key in BASE_HOLIDAYS:
+        return True
+    if custom_holidays and date_key in custom_holidays:
+        return True
+    return False
 
 def mape(y_true, y_pred):
     y_true, y_pred = np.array(y_true, dtype=np.float64), np.array(y_pred, dtype=np.float64)
@@ -43,7 +72,7 @@ def remove_outliers(series):
     clean[(clean < lower) | (clean > upper)] = np.nan
     return clean.interpolate().bfill().ffill()
 
-def train_ml_model(model, train_series, test_index, lags, freq, holiday_series=None):
+def train_ml_model(model, train_series, test_index, lags, freq, holiday_series=None, custom_holidays=None):
     X = pd.DataFrame(index=train_series.index)
     for lag in range(1, lags+1):
         X[f'lag_{lag}'] = train_series.shift(lag)
@@ -62,14 +91,14 @@ def train_ml_model(model, train_series, test_index, lags, freq, holiday_series=N
         for j in range(lags):
             feat[f'lag_{j+1}'] = hist[-j-1] if len(hist) > j else np.nan
         if holiday_series is not None:
-            feat['holiday'] = 1 if is_holiday(dt) else 0
+            feat['holiday'] = 1 if is_holiday(dt, custom_holidays) else 0
         X_row = pd.DataFrame([feat])
         pred = model.predict(X_row)[0]
         test_pred.append(pred)
         hist.append(pred)
     return np.array(test_pred), model, X
 
-def process_target(df_f, target_col, freq, horizon):
+def process_target(df_f, target_col, freq, horizon, custom_holidays=None):
     ts = df_f.set_index('datetime')[target_col].astype(np.float64).resample(freq).sum()
     ts = ts.asfreq(freq).interpolate().bfill().ffill().dropna()
     if len(ts) < horizon + 5:
@@ -84,7 +113,7 @@ def process_target(df_f, target_col, freq, horizon):
     holiday_series = None
     if freq == 'W-MON':
         holiday_series = pd.Series(
-            [1 if is_holiday(d) else 0 for d in train.index],
+            [1 if is_holiday(d, custom_holidays) else 0 for d in train.index],
             index=train.index, dtype=np.int8
         )
 
@@ -106,7 +135,7 @@ def process_target(df_f, target_col, freq, horizon):
 
     # Random Forest
     rf = RandomForestRegressor(n_estimators=50, max_depth=7, random_state=42, n_jobs=-1)
-    pred_rf, rf_model, X_rf = train_ml_model(rf, train, test.index, lags, freq, holiday_series)
+    pred_rf, rf_model, X_rf = train_ml_model(rf, train, test.index, lags, freq, holiday_series, custom_holidays)
     if pred_rf is not None:
         models['Random Forest'] = {
             'rmse': np.sqrt(mean_squared_error(test, pred_rf)),
@@ -120,7 +149,7 @@ def process_target(df_f, target_col, freq, horizon):
     if HAS_XGB:
         xgb = XGBRegressor(n_estimators=80, max_depth=6, learning_rate=0.05,
                            random_state=42, verbosity=0, n_jobs=-1)
-        pred_xgb, xgb_model, X_xgb = train_ml_model(xgb, train, test.index, lags, freq, holiday_series)
+        pred_xgb, xgb_model, X_xgb = train_ml_model(xgb, train, test.index, lags, freq, holiday_series, custom_holidays)
         if pred_xgb is not None:
             models['XGBoost'] = {
                 'rmse': np.sqrt(mean_squared_error(test, pred_xgb)),
@@ -155,7 +184,7 @@ def process_target(df_f, target_col, freq, horizon):
         for lag in range(1, lags+1):
             X_full[f'lag_{lag}'] = full_ts.shift(lag)
         if holiday_series is not None:
-            X_full['holiday'] = pd.Series([is_holiday(d) for d in full_ts.index],
+            X_full['holiday'] = pd.Series([is_holiday(d, custom_holidays) for d in full_ts.index],
                                           index=full_ts.index, dtype=np.int8)
         y_full = full_ts.copy()
         valid = ~X_full.isna().any(axis=1)
@@ -168,7 +197,7 @@ def process_target(df_f, target_col, freq, horizon):
         full_model.fit(X_full, y_full)
         future_hol = None
         if freq == 'W-MON':
-            future_hol = [1 if is_holiday(d) else 0 for d in future]
+            future_hol = [1 if is_holiday(d, custom_holidays) else 0 for d in future]
         hist = y_full.iloc[-lags:].tolist()
         forecast = []
         for i in range(horizon):
@@ -264,6 +293,19 @@ if uploaded:
         value=5,
         help="При выборе более 12 месяцев (52 недель) точность прогноза может снижаться."
     )
+
+    # Пользовательские праздники
+    with st.expander("🎉 Дополнительные праздники (необязательно)"):
+        st.caption("Введите даты через запятую в формате ДД.ММ (например: 31.12, 08.03, 09.05)")
+        custom_hol_text = st.text_area(
+            "Свои праздники",
+            placeholder="31.12, 08.03, 09.05",
+            help="Будут учитываться наряду с базовыми праздниками РФ"
+        )
+        custom_holidays = parse_custom_holidays(custom_hol_text)
+        if custom_holidays:
+            st.success(f"Добавлено праздников: {len(custom_holidays)} — {', '.join([f'{d:02d}.{m:02d}' for m,d in sorted(custom_holidays)])}")
+
     show_advanced = st.checkbox("📊 Расширенная аналитика (включая корреляции, важность признаков, ACF)")
 
     # Фильтрация
@@ -280,12 +322,12 @@ if uploaded:
 
         try:
             status.text("Агрегация..."); progress.progress(5)
-            res_total = process_target(df_f, 'total', freq, horizon)
+            res_total = process_target(df_f, 'total', freq, horizon, custom_holidays)
             if res_total is None:
                 st.error("Недостаточно данных для прогноза total"); st.stop()
 
             status.text("Прогноз количества..."); progress.progress(50)
-            res_qty = process_target(df_f, 'quantity', freq, horizon)
+            res_qty = process_target(df_f, 'quantity', freq, horizon, custom_holidays)
 
             progress.progress(90)
             status.text("Формирование результатов...")
