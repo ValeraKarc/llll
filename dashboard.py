@@ -82,15 +82,41 @@ def train_ml_model(model, train_series, test_index, lags, freq, holiday_series=N
 # ---------------------------- Обработка одного ряда ----------------------------
 def process_target(df_f, target_col, freq, horizon):
     ts = df_f.set_index('datetime')[target_col].astype(np.float64).resample(freq).sum()
-    ts = ts.asfreq(freq).interpolate().bfill().ffill().dropna()
+    ts = ts.asfreq(freq)
+    # Принудительно создаём все периоды в диапазоне
+    full_idx = pd.date_range(start=ts.index.min(), end=ts.index.max(), freq=freq)
+    ts = ts.reindex(full_idx)
+    ts = ts.interpolate().bfill().ffill().dropna()
+
+    # Отладка: показываем временной ряд
+    if target_col == 'total':
+        st.caption(f"📊 Временной ряд: {len(ts)} точек, с {ts.index[0].strftime('%Y-%m')} по {ts.index[-1].strftime('%Y-%m')}")
+        missing = full_idx.difference(ts.index)
+        if len(missing) > 0:
+            st.warning(f"⚠️ Пропущенные периоды в агрегации: {', '.join([d.strftime('%Y-%m') for d in missing])}")
+
     if len(ts) < horizon + 5:
         return None
     ts = remove_outliers(ts)
     train, test = ts.iloc[:-horizon], ts.iloc[-horizon:]
 
-    sp = {'W-MON':52,'MS':12}[freq]
+    # Проверка пропусков между train и test
+    if freq == 'D':
+        expected_next = train.index[-1] + pd.Timedelta(days=1)
+    elif freq == 'W-MON':
+        expected_next = train.index[-1] + pd.DateOffset(weeks=1)
+    elif freq == 'MS':
+        expected_next = train.index[-1] + pd.DateOffset(months=1)
+    else:
+        expected_next = train.index[-1] + pd.Timedelta(days=1)
+    if test.index[0] != expected_next:
+        gap_months = pd.date_range(start=expected_next, end=test.index[0], freq=freq, inclusive='left')
+        if len(gap_months) > 0:
+            st.warning(f"⚠️ Обнаружен пропуск в данных между обучением и тестом: {len(gap_months)} период(ов) отсутствуют ({gap_months[0].strftime('%Y-%m')} — {gap_months[-1].strftime('%Y-%m')}). График соединит точки, но модель обучалась без этих данных.")
+
+    sp = {'D':7,'W-MON':52,'MS':12}[freq]
     if sp >= len(train): sp = max(2, len(train)//2)
-    lags = 24 if freq == 'W-MON' else min(6, len(train)//2)
+    lags = 14 if freq == 'D' else (24 if freq == 'W-MON' else min(6, len(train)//2))
 
     holiday_series = None
     if freq in ('D','W-MON'):
@@ -149,7 +175,9 @@ def process_target(df_f, target_col, freq, horizon):
 
     # Финальный прогноз (полный ряд)
     full_ts = pd.concat([train, test])
-    if freq == 'W-MON':
+    if freq == 'D':
+        start_future = full_ts.index[-1] + pd.Timedelta(days=1)
+    elif freq == 'W-MON':
         start_future = full_ts.index[-1] + pd.DateOffset(weeks=1)
     elif freq == 'MS':
         start_future = full_ts.index[-1] + pd.DateOffset(months=1)
@@ -252,7 +280,12 @@ if uploaded:
     df['date'] = df['date'].astype(str).str.strip()
     df['time'] = df['time'].astype(str).str.strip()
     time_empty = df['time'].str.replace(r'[\s\.]','',regex=True).eq('').all()
-    df['datetime'] = pd.to_datetime(df['date'] + (' ' + df['time'] if not time_empty else ''), errors='coerce')
+    # Робастный парсинг дат
+    date_str = df['date'] + (' ' + df['time'] if not time_empty else '')
+    df['datetime'] = pd.to_datetime(date_str, errors='coerce')
+    # Если много NaT — пробуем русский формат DD.MM.YYYY
+    if df['datetime'].isna().sum() > len(df) * 0.1:
+        df['datetime'] = pd.to_datetime(date_str, dayfirst=True, errors='coerce')
     df.dropna(subset=['datetime','quantity','price','total'], inplace=True)
     df = df[df['total'] > 0].drop_duplicates()
     df.sort_values('datetime', inplace=True)
@@ -263,8 +296,16 @@ if uploaded:
     with st.expander("🔍 Первые 5 строк"):
         st.dataframe(df.head(5))
 
+    # Отладка: показываем диапазон дат после парсинга
+    with st.expander("📅 Диапазон дат в файле"):
+        st.write(f"Минимальная дата: {df['datetime'].min()}")
+        st.write(f"Максимальная дата: {df['datetime'].max()}")
+        st.write(f"Уникальных месяцев: {df['datetime'].dt.to_period('M').nunique()}")
+        st.write("Месяцы по категориям/товарам:")
+        st.dataframe(df.groupby([df['datetime'].dt.to_period('M').astype(str), 'category'])['total'].sum().unstack(fill_value=0))
+
     col1, col2, col3 = st.columns(3)
-    freq_map = {'неделя': 'W-MON', 'месяц': 'MS'}
+    freq_map = {'день': 'D', 'неделя': 'W-MON', 'месяц': 'MS'}
     freq_label = col1.selectbox("Периодичность", list(freq_map.keys()), index=1)
     freq = freq_map[freq_label]
     cats = ['Все'] + sorted(df['category'].unique())
@@ -274,8 +315,8 @@ if uploaded:
     horizon = st.number_input(
         "Горизонт (периодов)",
         min_value=1,
-        max_value=52,
-        value=5,
+        max_value=90 if freq == 'D' else 52,
+        value=14 if freq == 'D' else 5,
         help="При выборе более 12 месяцев (52 недель) точность прогноза может снижаться."
     )
     show_advanced = st.checkbox("📊 Расширенная аналитика (включая корреляции, важность признаков, ACF)")
@@ -316,10 +357,10 @@ if uploaded:
 
             # График total
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=res_total['train'].index, y=res_total['train'].values, name='Обучающие (реальные)', line=dict(color='blue')))
-            fig.add_trace(go.Scatter(x=res_total['test'].index, y=res_total['test'].values, name='Тестовые (реальные)', line=dict(color='orange')))
-            fig.add_trace(go.Scatter(x=res_total['test'].index, y=res_total['pred_test'], name='Предсказание на тесте', line=dict(color='red', dash='dash')))
-            fig.add_trace(go.Scatter(x=res_total['future'], y=res_total['forecast'], name='Будущий прогноз', line=dict(color='green')))
+            fig.add_trace(go.Scatter(x=res_total['train'].index, y=res_total['train'].values, name='Обучающие (реальные)', line=dict(color='blue'), mode='lines+markers', connectgaps=True))
+            fig.add_trace(go.Scatter(x=res_total['test'].index, y=res_total['test'].values, name='Тестовые (реальные)', line=dict(color='orange'), mode='lines+markers', connectgaps=True))
+            fig.add_trace(go.Scatter(x=res_total['test'].index, y=res_total['pred_test'], name='Предсказание на тесте', line=dict(color='red', dash='dash'), mode='lines+markers', connectgaps=True))
+            fig.add_trace(go.Scatter(x=res_total['future'], y=res_total['forecast'], name='Будущий прогноз', line=dict(color='green'), mode='lines+markers'))
             fig.add_trace(go.Scatter(x=np.concatenate([res_total['future'], res_total['future'][::-1]]),
                                      y=np.concatenate([res_total['upper'], res_total['lower'][::-1]]),
                                      fill='toself', fillcolor='rgba(44,160,44,0.2)',
