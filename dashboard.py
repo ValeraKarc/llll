@@ -154,7 +154,7 @@ def process_target(df_f, target_col, freq, horizon):
     elif freq == 'MS':
         start_future = full_ts.index[-1] + pd.DateOffset(months=1)
     else:
-        start_future = full_ts.index[-1] + pd.DateOffset(1)
+        start_future = full_ts.index[-1] + pd.Timedelta(days=1)
     future = pd.date_range(start=start_future, periods=horizon, freq=freq)
 
     if best_name == 'Holt-Winters':
@@ -207,7 +207,7 @@ def process_target(df_f, target_col, freq, horizon):
         'best_name': best_name, 'models': models, 'sp': sp,
         'lags': lags, 'freq': freq,
         'X_train_for_best': best.get('X_train', None),
-        'pred_test': best['pred_test']  # <-- ДОБАВЛЕНО: предсказания на тестовом периоде
+        'pred_test': best['pred_test']
     }
 
 # ---------------------------- Интерфейс ----------------------------
@@ -314,85 +314,22 @@ if uploaded:
                 best_other = min(other_total, key=lambda x: res_total['models'][x]['mape'])
                 col3.metric(f"Альтернатива: {best_other}", f"MAPE {res_total['models'][best_other]['mape']:.2f}%")
 
-            # График total — УЛУЧШЕННАЯ ВЕРСИЯ
+            # График total
             fig = go.Figure()
-
-            # Обучающие данные (реальные)
-            fig.add_trace(go.Scatter(
-                x=res_total['train'].index, 
-                y=res_total['train'].values, 
-                name='Обучающие (реальные)', 
-                line=dict(color='blue', width=2),
-                mode='lines+markers',
-                marker=dict(size=4)
-            ))
-
-            # Тестовые данные (реальные)
-            fig.add_trace(go.Scatter(
-                x=res_total['test'].index, 
-                y=res_total['test'].values, 
-                name='Тестовые (реальные)', 
-                line=dict(color='orange', width=2),
-                mode='lines+markers',
-                marker=dict(size=6, symbol='circle')
-            ))
-
-            # ПРЕДСКАЗАНИЯ на тестовом периоде (чтобы видеть точность)
-            fig.add_trace(go.Scatter(
-                x=res_total['test'].index, 
-                y=res_total['pred_test'], 
-                name='Предсказание на тесте', 
-                line=dict(color='red', width=2, dash='dash'),
-                mode='lines+markers',
-                marker=dict(size=5, symbol='x')
-            ))
-
-            # Будущий прогноз
-            fig.add_trace(go.Scatter(
-                x=res_total['future'], 
-                y=res_total['forecast'], 
-                name='Будущий прогноз', 
-                line=dict(color='green', width=2),
-                mode='lines+markers',
-                marker=dict(size=5, symbol='diamond')
-            ))
-
-            # Доверительный интервал для будущего прогноза
-            fig.add_trace(go.Scatter(
-                x=np.concatenate([res_total['future'], res_total['future'][::-1]]),
-                y=np.concatenate([res_total['upper'], res_total['lower'][::-1]]),
-                fill='toself', 
-                fillcolor='rgba(44,160,44,0.15)',
-                line=dict(color='rgba(255,255,255,0)'), 
-                name='90% CI',
-                hoverinfo='skip'
-            ))
-
-            # Вертикальная линия раздела: обучение / тест
-            split_test = res_total['test'].index[0]
-            fig.add_vline(
-                x=split_test, 
-                line=dict(color='gray', dash='dot', width=1),
-                annotation_text="Начало теста", 
-                annotation_position="top"
-            )
-
-            # Вертикальная линия раздела: тест / будущее
-            split_future = res_total['future'][0]
-            fig.add_vline(
-                x=split_future, 
-                line=dict(color='purple', dash='dot', width=1),
-                annotation_text="Начало прогноза", 
-                annotation_position="top"
-            )
-
-            fig.update_layout(
-                title=f'Прогноз суммы продаж — {res_total["best_name"]}',
-                xaxis_title='Дата', 
-                yaxis_title='Сумма',
-                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-                hovermode='x unified'
-            )
+            fig.add_trace(go.Scatter(x=res_total['train'].index, y=res_total['train'].values, name='Обучающие (реальные)', line=dict(color='blue')))
+            fig.add_trace(go.Scatter(x=res_total['test'].index, y=res_total['test'].values, name='Тестовые (реальные)', line=dict(color='orange')))
+            fig.add_trace(go.Scatter(x=res_total['test'].index, y=res_total['pred_test'], name='Предсказание на тесте', line=dict(color='red', dash='dash')))
+            fig.add_trace(go.Scatter(x=res_total['future'], y=res_total['forecast'], name='Будущий прогноз', line=dict(color='green')))
+            fig.add_trace(go.Scatter(x=np.concatenate([res_total['future'], res_total['future'][::-1]]),
+                                     y=np.concatenate([res_total['upper'], res_total['lower'][::-1]]),
+                                     fill='toself', fillcolor='rgba(44,160,44,0.2)',
+                                     line=dict(color='rgba(255,255,255,0)'), name='90% CI'))
+            split = res_total['test'].index[0]
+            fig.add_shape(type='line', x0=split, x1=split, y0=0, y1=1, yref='paper',
+                          line=dict(color='red', dash='dash'))
+            fig.add_annotation(x=split, y=1, yref='paper', text='Прогноз', showarrow=False,
+                               xanchor='left', textangle=-90)
+            fig.update_layout(title=f'Прогноз суммы продаж ({res_total["best_name"]})', xaxis_title='Дата', yaxis_title='Сумма')
             st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
             # Таблица прогнозов
