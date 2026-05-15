@@ -1,7 +1,13 @@
 import streamlit as st, pandas as pd, numpy as np, plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import time, gc, warnings
+from io import BytesIO
+import base64, time, gc, os, warnings
 warnings.filterwarnings('ignore')
+
+import matplotlib
+if 'DISPLAY' not in os.environ:
+    matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
@@ -77,37 +83,17 @@ def train_ml_model(model, train_series, test_index, lags, freq, holiday_series=N
 def process_target(df_f, target_col, freq, horizon):
     ts = df_f.set_index('datetime')[target_col].astype(np.float64).resample(freq).sum()
     ts = ts.asfreq(freq).interpolate().bfill().ffill().dropna()
-
-    # Отладка: показываем временной ряд
-    if target_col == 'total':
-        st.caption(f"📊 Временной ряд: {len(ts)} точек, с {ts.index[0].strftime('%Y-%m')} по {ts.index[-1].strftime('%Y-%m')}")
-        missing = full_idx.difference(ts.index)
-        if len(missing) > 0:
-            st.warning(f"⚠️ Пропущенные периоды в агрегации: {', '.join([d.strftime('%Y-%m') for d in missing])}")
-
     if len(ts) < horizon + 5:
         return None
     ts = remove_outliers(ts)
     train, test = ts.iloc[:-horizon], ts.iloc[-horizon:]
-
-    # Проверка пропусков между train и test
-    if freq == 'MS':
-        expected_next = train.index[-1] + pd.DateOffset(months=1)
-    elif freq == 'W-MON':
-        expected_next = train.index[-1] + pd.DateOffset(weeks=1)
-    else:
-        expected_next = train.index[-1] + pd.Timedelta(days=1)
-    if test.index[0] != expected_next:
-        gap_months = pd.date_range(start=expected_next, end=test.index[0], freq=freq, inclusive='left')
-        if len(gap_months) > 0:
-            st.warning(f"⚠️ Обнаружен пропуск в данных между обучением и тестом: {len(gap_months)} период(ов) отсутствуют ({gap_months[0].strftime('%Y-%m')} — {gap_months[-1].strftime('%Y-%m')}). График соединит точки, но модель обучалась без этих данных.")
 
     sp = {'W-MON':52,'MS':12}[freq]
     if sp >= len(train): sp = max(2, len(train)//2)
     lags = 24 if freq == 'W-MON' else min(6, len(train)//2)
 
     holiday_series = None
-    if freq == 'W-MON':
+    if freq in ('D','W-MON'):
         holiday_series = pd.Series(
             [1 if is_holiday(d) else 0 for d in train.index],
             index=train.index, dtype=np.int8
@@ -194,7 +180,7 @@ def process_target(df_f, target_col, freq, horizon):
                                       random_state=42, verbosity=0, n_jobs=-1)
         full_model.fit(X_full, y_full)
         future_hol = None
-        if freq == 'W-MON':
+        if freq in ('D','W-MON'):
             future_hol = [1 if is_holiday(d) else 0 for d in future]
         hist = y_full.iloc[-lags:].tolist()
         forecast = []
@@ -277,7 +263,6 @@ if uploaded:
     with st.expander("🔍 Первые 5 строк"):
         st.dataframe(df.head(5))
 
-
     col1, col2, col3 = st.columns(3)
     freq_map = {'неделя': 'W-MON', 'месяц': 'MS'}
     freq_label = col1.selectbox("Периодичность", list(freq_map.keys()), index=1)
@@ -331,10 +316,10 @@ if uploaded:
 
             # График total
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=res_total['train'].index, y=res_total['train'].values, name='Обучающие (реальные)', line=dict(color='blue'), mode='lines+markers', connectgaps=True))
-            fig.add_trace(go.Scatter(x=res_total['test'].index, y=res_total['test'].values, name='Тестовые (реальные)', line=dict(color='orange'), mode='lines+markers', connectgaps=True))
-            fig.add_trace(go.Scatter(x=res_total['test'].index, y=res_total['pred_test'], name='Предсказание на тесте', line=dict(color='red', dash='dash'), mode='lines+markers', connectgaps=True))
-            fig.add_trace(go.Scatter(x=res_total['future'], y=res_total['forecast'], name='Будущий прогноз', line=dict(color='green'), mode='lines+markers'))
+            fig.add_trace(go.Scatter(x=res_total['train'].index, y=res_total['train'].values, name='Обучающие (реальные)', line=dict(color='blue')))
+            fig.add_trace(go.Scatter(x=res_total['test'].index, y=res_total['test'].values, name='Тестовые (реальные)', line=dict(color='orange')))
+            fig.add_trace(go.Scatter(x=res_total['test'].index, y=res_total['pred_test'], name='Предсказание на тесте', line=dict(color='red', dash='dash')))
+            fig.add_trace(go.Scatter(x=res_total['future'], y=res_total['forecast'], name='Будущий прогноз', line=dict(color='green')))
             fig.add_trace(go.Scatter(x=np.concatenate([res_total['future'], res_total['future'][::-1]]),
                                      y=np.concatenate([res_total['upper'], res_total['lower'][::-1]]),
                                      fill='toself', fillcolor='rgba(44,160,44,0.2)',
