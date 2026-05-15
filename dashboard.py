@@ -138,8 +138,7 @@ def process_target(df_f, target_col, freq, horizon):
 
     sp = {'W-MON':52,'MS':12}[freq]
     if sp >= len(train): sp = max(2, len(train)//3)
-    lags = {'W-MON':24,'MS':6}[freq]
-    lags = min(lags, len(train)//3)
+    lags = min({'W-MON':24,'MS':6}[freq], len(train)//3)
 
     holidays = None
     if freq in ('D','W-MON'):
@@ -196,14 +195,17 @@ def process_target(df_f, target_col, freq, horizon):
 
     full_ts = pd.concat([train, test])
 
-    # FIX: Use pd.Timedelta instead of integer arithmetic with Timestamp
+    # FIX: Use pd.date_range with periods parameter to generate future dates
+    # This avoids Timestamp arithmetic entirely
+    last_date = full_ts.index[-1]
     if freq == 'W-MON':
-        start_future = full_ts.index[-1] + pd.Timedelta(weeks=1)
+        # For weekly, add 7 days to last date and create range
+        start_future = last_date + pd.Timedelta(days=7)
     elif freq == 'MS':
-        # For month start, use pd.DateOffset
-        start_future = full_ts.index[-1] + pd.DateOffset(months=1)
+        # For monthly, use DateOffset which handles month boundaries
+        start_future = last_date + pd.DateOffset(months=1)
     else:
-        start_future = full_ts.index[-1] + pd.Timedelta(days=1)
+        start_future = last_date + pd.Timedelta(days=1)
 
     future = pd.date_range(start=start_future, periods=horizon, freq=freq)
 
@@ -409,7 +411,6 @@ if uploaded:
             res_qty = process_target(df_f, 'quantity', freq, horizon)
 
             prog.progress(85); status.text("Формирование отчета...")
-
             prog.empty(); status.empty()
 
             # Results
