@@ -645,6 +645,65 @@ def generate_pdf_report(res_total, res_qty, df_info, horizon, freq_label):
     return pdf
 
 # =============================================================================
+# ENCODING DETECTION - ROBUST VERSION
+# =============================================================================
+
+def detect_encoding_robust(raw_bytes):
+    """Robust encoding detection with multiple fallbacks."""
+
+    # Priority encodings to try (most common for Russian/Windows files)
+    encodings_to_try = [
+        'utf-8-sig',      # UTF-8 with BOM (most common for Excel exports)
+        'utf-8',          # Standard UTF-8
+        'cp1251',         # Windows Cyrillic (very common in Russia)
+        'windows-1251',   # Alias for cp1251
+        'iso-8859-5',     # ISO Cyrillic
+        'koi8-r',         # Legacy Russian encoding
+        'cp866',          # DOS Cyrillic
+        'latin-1',        # Fallback that never fails (maps bytes 1:1)
+    ]
+
+    # Try chardet if available
+    try:
+        import chardet
+        detected = chardet.detect(raw_bytes)
+        if detected and detected.get('confidence', 0) > 0.7:
+            detected_enc = detected.get('encoding', '').lower()
+            # Map common chardet names to Python names
+            encoding_map = {
+                'windows-1251': 'cp1251',
+                'windows-1252': 'cp1252',
+                'iso-8859-1': 'latin-1',
+                'ascii': 'utf-8',
+            }
+            mapped_enc = encoding_map.get(detected_enc, detected_enc)
+            if mapped_enc:
+                # Insert detected encoding at the beginning if not already there
+                if mapped_enc not in encodings_to_try:
+                    encodings_to_try.insert(0, mapped_enc)
+                else:
+                    # Move to top
+                    encodings_to_try.remove(mapped_enc)
+                    encodings_to_try.insert(0, mapped_enc)
+    except ImportError:
+        pass
+
+    # Try each encoding
+    for enc in encodings_to_try:
+        try:
+            decoded = raw_bytes.decode(enc)
+            # Validate: check for common corruption indicators
+            # If we see lots of replacement characters or odd patterns, skip
+            if '\ufffd' in decoded or '\x00' in decoded[:1000]:
+                continue
+            return enc, decoded
+        except (UnicodeDecodeError, LookupError):
+            continue
+
+    # Ultimate fallback: latin-1 never fails (maps bytes 1:1)
+    return 'latin-1', raw_bytes.decode('latin-1')
+
+# =============================================================================
 # STREAMLIT UI
 # =============================================================================
 
@@ -741,20 +800,15 @@ if uploaded:
     try:
         raw_bytes = uploaded.read()
 
-        # Detect encoding
-        try:
-            import chardet
-            detected = chardet.detect(raw_bytes)
-            enc = detected.get('encoding', 'utf-8') if detected.get('confidence', 0) > 0.5 else 'utf-8'
-        except ImportError:
-            enc = 'utf-8'
+        # ROBUST ENCODING DETECTION
+        detected_enc, decoded_text = detect_encoding_robust(raw_bytes)
 
-        # Parse CSV
-        df = pd.read_csv(
-            io.BytesIO(raw_bytes),
-            encoding=enc,
-            dtype=str  # Read all as string first for validation
-        )
+        # Show detected encoding to user
+        st.info(f"🔤 Обнаружена кодировка файла: **{detected_enc}**")
+
+        # Parse CSV from decoded text
+        from io import StringIO
+        df = pd.read_csv(StringIO(decoded_text), dtype=str)
 
         # Clean column names (handle spaces)
         df.columns = df.columns.str.strip().str.lower()
@@ -820,7 +874,13 @@ if uploaded:
 
     except Exception as e:
         st.error(f"❌ Ошибка обработки файла: {str(e)}")
-        st.info("Проверьте формат файла: разделитель должен быть запятой, первая строка — заголовки.")
+        st.info("""
+        Рекомендации:
+        1. Убедитесь, что файл действительно в формате CSV (разделитель — запятая)
+        2. Проверьте, что первая строка содержит заголовки столбцов
+        3. Попробуйте сохранить файл через Excel с кодировкой UTF-8
+        4. Если файл создан в 1С или другой российской системе — попробуйте кодировку Windows-1251
+        """)
         st.stop()
 
 # Forecast configuration
