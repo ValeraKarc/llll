@@ -4,7 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import io, time, gc, warnings, hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 
 warnings.filterwarnings('ignore')
 
@@ -195,17 +195,24 @@ def process_target(df_f, target_col, freq, horizon):
 
     full_ts = pd.concat([train, test])
 
-    # FIX: Use pd.date_range with periods parameter to generate future dates
-    # This avoids Timestamp arithmetic entirely
-    last_date = full_ts.index[-1]
+    # FIX: Use Python datetime + timedelta to avoid pandas Timestamp arithmetic issues
+    # Convert to plain datetime, add offset, then create new date_range
+    last_dt = full_ts.index[-1]
+
     if freq == 'W-MON':
-        # For weekly, add 7 days to last date and create range
-        start_future = last_date + pd.Timedelta(days=7)
+        # Weekly: add 7 days using Python timedelta
+        start_future = pd.Timestamp(last_dt.to_pydatetime() + timedelta(days=7))
     elif freq == 'MS':
-        # For monthly, use DateOffset which handles month boundaries
-        start_future = last_date + pd.DateOffset(months=1)
+        # Monthly: use pandas DateOffset but convert through datetime to avoid freq issues
+        # Get year and month, add 1 month manually
+        yr, mo = last_dt.year, last_dt.month
+        if mo == 12:
+            yr, mo = yr + 1, 1
+        else:
+            mo = mo + 1
+        start_future = pd.Timestamp(datetime(yr, mo, 1))
     else:
-        start_future = last_date + pd.Timedelta(days=1)
+        start_future = pd.Timestamp(last_dt.to_pydatetime() + timedelta(days=1))
 
     future = pd.date_range(start=start_future, periods=horizon, freq=freq)
 
