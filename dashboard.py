@@ -195,26 +195,47 @@ def process_target(df_f, target_col, freq, horizon):
 
     full_ts = pd.concat([train, test])
 
-    # FIX: Use Python datetime + timedelta to avoid pandas Timestamp arithmetic issues
-    # Convert to plain datetime, add offset, then create new date_range
-    last_dt = full_ts.index[-1]
+    # CRITICAL FIX: Generate future dates using pure Python, zero pandas arithmetic
+    # Get the last timestamp as plain Python datetime
+    last_idx = full_ts.index[-1]
+
+    # Convert to plain Python datetime object (no pandas Timestamp, no freq)
+    if hasattr(last_idx, 'to_pydatetime'):
+        last_py_dt = last_idx.to_pydatetime()
+    else:
+        last_py_dt = datetime(last_idx.year, last_idx.month, last_idx.day)
+
+    # Generate future dates as plain Python datetimes first
+    future_py_dates = []
 
     if freq == 'W-MON':
-        # Weekly: add 7 days using Python timedelta
-        start_future = pd.Timestamp(last_dt.to_pydatetime() + timedelta(days=7))
+        # Weekly: add 7 days each step
+        # Find next Monday
+        days_until_monday = (7 - last_py_dt.weekday()) % 7
+        if days_until_monday == 0:
+            days_until_monday = 7  # If already Monday, go to next Monday
+        current = last_py_dt + timedelta(days=days_until_monday)
+        for _ in range(horizon):
+            future_py_dates.append(current)
+            current += timedelta(days=7)
     elif freq == 'MS':
-        # Monthly: use pandas DateOffset but convert through datetime to avoid freq issues
-        # Get year and month, add 1 month manually
-        yr, mo = last_dt.year, last_dt.month
-        if mo == 12:
-            yr, mo = yr + 1, 1
-        else:
-            mo = mo + 1
-        start_future = pd.Timestamp(datetime(yr, mo, 1))
+        # Monthly: first day of next month
+        yr, mo = last_py_dt.year, last_py_dt.month
+        for _ in range(horizon):
+            if mo == 12:
+                yr, mo = yr + 1, 1
+            else:
+                mo = mo + 1
+            future_py_dates.append(datetime(yr, mo, 1))
     else:
-        start_future = pd.Timestamp(last_dt.to_pydatetime() + timedelta(days=1))
+        # Daily fallback
+        current = last_py_dt + timedelta(days=1)
+        for _ in range(horizon):
+            future_py_dates.append(current)
+            current += timedelta(days=1)
 
-    future = pd.date_range(start=start_future, periods=horizon, freq=freq)
+    # Convert Python datetimes to pandas DatetimeIndex WITHOUT freq
+    future = pd.DatetimeIndex([pd.Timestamp(d) for d in future_py_dates])
 
     # Final forecast
     if best_name == 'Holt-Winters' and best['model'] is not None:
