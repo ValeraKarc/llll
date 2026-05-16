@@ -227,13 +227,13 @@ def process_target(df_f, target_col, freq, horizon, custom_holidays=None):
     }
 
 st.set_page_config(page_title="Интеллектуальная модель прогнозирования продаж", layout="wide")
-st.title("📈 Интеллектуальная модель прогнозирования продаж")
+st.title("Интеллектуальная модель прогнозирования продаж")
 st.markdown("Загрузите CSV-файл с продажами и получите прогноз с автоматическим выбором лучшей модели.")
 
 with st.sidebar:
     st.info("**Обязательные столбцы:** date, time, category, product, quantity, price, total\n\n"
             "**Формат даты:** любой\n"
-            "**Кодировка:** авто или вручную")
+            )
 
     # Подсказка о праздниках и рекомендация по данным
     st.info("**Учитываемые праздники:** 1–8 января, 23 февраля, 8 марта, 1 и 9 мая, "
@@ -281,7 +281,7 @@ if uploaded:
         st.error("Нет данных после очистки"); st.stop()
 
     st.success(f"✅ {len(df)} записей загружено")
-    with st.expander("🔍 Первые 5 строк"):
+    with st.expander("Первые 5 строк"):
         st.dataframe(df.head(5))
 
     col1, col2, col3 = st.columns(3)
@@ -447,7 +447,7 @@ if uploaded:
                     st.plotly_chart(fig_corr, use_container_width=True)
                     st.caption("Матрица показывает взаимосвязи между лагами, временными метками и продажами. Высокие значения (ближе к ±1) – сильная связь.")
 
-            st.caption(f"⏱️ Прогноз построен за {time.time()-start:.1f} сек.")
+            st.caption(f"Прогноз построен за {time.time()-start:.1f} сек.")
 
         except Exception as e:
             st.error(f"Ошибка: {e}")
