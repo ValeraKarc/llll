@@ -1,19 +1,14 @@
 import streamlit as st, pandas as pd, numpy as np, plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from io import BytesIO
-import base64, time, gc, os, warnings
+import time, gc, warnings
 warnings.filterwarnings('ignore')
-
-import matplotlib
-if 'DISPLAY' not in os.environ:
-    matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.seasonal import seasonal_decompose
-from statsmodels.tsa.stattools import acf
+
+# Убран импорт acf - матрица корреляций и АКФ удалены
 
 try:
     from xgboost import XGBRegressor
@@ -21,8 +16,8 @@ try:
 except ImportError:
     HAS_XGB = False
 
-# ---------------------------- Праздники РФ ----------------------------
-HOLIDAY_DATES = {
+# Базовые праздники РФ (можно расширить через интерфейс)
+BASE_HOLIDAYS = {
     (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7), (1, 8),  # Новогодние каникулы
     (2, 23),  # День защитника Отечества
     (3, 8),   # Международный женский день
@@ -31,17 +26,43 @@ HOLIDAY_DATES = {
     (6, 12),  # День России
     (11, 4),  # День народного единства
 }
-def is_holiday(dt):
-    return (dt.month, dt.day) in HOLIDAY_DATES
 
-# ---------------------------- Метрика ----------------------------
+def parse_custom_holidays(text):
+    """Парсит пользовательские праздники из текста формата 'ДД.ММ' или 'ДД.MM'.
+    Пример: '31.12, 08.03, 09.05' -> {(12,31), (3,8), (5,9)}
+    """
+    if not text or not text.strip():
+        return set()
+    holidays = set()
+    for item in text.replace(';', ',').split(','):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            # Поддержка форматов: ДД.ММ, ДД/MM, ДД-MM
+            item = item.replace('/', '.').replace('-', '.')
+            day, month = map(int, item.split('.'))
+            if 1 <= day <= 31 and 1 <= month <= 12:
+                holidays.add((month, day))
+        except (ValueError, IndexError):
+            continue
+    return holidays
+
+def is_holiday(dt, custom_holidays=None):
+    """Проверяет, является ли дата праздником (базовым или пользовательским)."""
+    date_key = (dt.month, dt.day)
+    if date_key in BASE_HOLIDAYS:
+        return True
+    if custom_holidays and date_key in custom_holidays:
+        return True
+    return False
+
 def mape(y_true, y_pred):
     y_true, y_pred = np.array(y_true, dtype=np.float64), np.array(y_pred, dtype=np.float64)
     mask = y_true != 0
     if np.sum(mask) == 0: return np.inf
     return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask]))
 
-# ---------------------------- Очистка выбросов ----------------------------
 def remove_outliers(series):
     q1 = series.quantile(0.25)
     q3 = series.quantile(0.75)
@@ -52,13 +73,12 @@ def remove_outliers(series):
     clean[(clean < lower) | (clean > upper)] = np.nan
     return clean.interpolate().bfill().ffill()
 
-# ---------------------------- Обучение ML ----------------------------
-def train_ml_model(model, train_series, test_index, lags, freq, holiday_series=None):
+def train_ml_model(model, train_series, test_index, lags, freq, holiday_series=None, custom_holidays=None):
     X = pd.DataFrame(index=train_series.index)
     for lag in range(1, lags+1):
-        X[f'lag_{lag}'] = train_series.shift(lag)
+        X[f'лаг_{lag}'] = train_series.shift(lag)
     if holiday_series is not None:
-        X['holiday'] = holiday_series
+        X['праздник'] = holiday_series
     y = train_series.copy()
     valid = ~X.isna().any(axis=1)
     X, y = X.loc[valid], y.loc[valid]
@@ -70,17 +90,16 @@ def train_ml_model(model, train_series, test_index, lags, freq, holiday_series=N
     for i, dt in enumerate(test_index):
         feat = {}
         for j in range(lags):
-            feat[f'lag_{j+1}'] = hist[-j-1] if len(hist) > j else np.nan
+            feat[f'лаг_{j+1}'] = hist[-j-1] if len(hist) > j else np.nan
         if holiday_series is not None:
-            feat['holiday'] = 1 if is_holiday(dt) else 0
+            feat['праздник'] = 1 if is_holiday(dt, custom_holidays) else 0
         X_row = pd.DataFrame([feat])
         pred = model.predict(X_row)[0]
         test_pred.append(pred)
         hist.append(pred)
     return np.array(test_pred), model, X
 
-# ---------------------------- Обработка одного ряда ----------------------------
-def process_target(df_f, target_col, freq, horizon):
+def process_target(df_f, target_col, freq, horizon, custom_holidays=None):
     ts = df_f.set_index('datetime')[target_col].astype(np.float64).resample(freq).sum()
     ts = ts.asfreq(freq).interpolate().bfill().ffill().dropna()
     if len(ts) < horizon + 5:
@@ -93,33 +112,33 @@ def process_target(df_f, target_col, freq, horizon):
     lags = 24 if freq == 'W-MON' else min(6, len(train)//2)
 
     holiday_series = None
-    if freq in ('D','W-MON'):
+    if freq == 'W-MON':
         holiday_series = pd.Series(
-            [1 if is_holiday(d) else 0 for d in train.index],
+            [1 if is_holiday(d, custom_holidays) else 0 for d in train.index],
             index=train.index, dtype=np.int8
         )
 
     models = {}
-    # Holt-Winters
+    # Хольт-Винтерс
     try:
         hw = ExponentialSmoothing(train, trend='add', seasonal='add',
                                   seasonal_periods=sp,
                                   initialization_method='estimated').fit()
         pred = hw.forecast(horizon)
-        models['Holt-Winters'] = {
+        models['Хольт-Винтерс'] = {
             'rmse': np.sqrt(mean_squared_error(test, pred)),
             'mape': mape(test, pred)*100,
             'pred_test': pred,
             'model': hw
         }
     except Exception as e:
-        st.warning(f"Holt-Winters ({target_col}): {e}")
+        st.warning(f"Хольт-Винтерс ({target_col}): {e}")
 
-    # Random Forest
+    # Случайный лес
     rf = RandomForestRegressor(n_estimators=50, max_depth=7, random_state=42, n_jobs=-1)
-    pred_rf, rf_model, X_rf = train_ml_model(rf, train, test.index, lags, freq, holiday_series)
+    pred_rf, rf_model, X_rf = train_ml_model(rf, train, test.index, lags, freq, holiday_series, custom_holidays)
     if pred_rf is not None:
-        models['Random Forest'] = {
+        models['Случайный лес'] = {
             'rmse': np.sqrt(mean_squared_error(test, pred_rf)),
             'mape': mape(test, pred_rf)*100,
             'pred_test': pred_rf,
@@ -127,13 +146,13 @@ def process_target(df_f, target_col, freq, horizon):
             'X_train': X_rf
         }
 
-    # XGBoost
+    # Градиентный Бустинг
     if HAS_XGB:
         xgb = XGBRegressor(n_estimators=80, max_depth=6, learning_rate=0.05,
                            random_state=42, verbosity=0, n_jobs=-1)
-        pred_xgb, xgb_model, X_xgb = train_ml_model(xgb, train, test.index, lags, freq, holiday_series)
+        pred_xgb, xgb_model, X_xgb = train_ml_model(xgb, train, test.index, lags, freq, holiday_series, custom_holidays)
         if pred_xgb is not None:
-            models['XGBoost'] = {
+            models['Градиентный Бустинг'] = {
                 'rmse': np.sqrt(mean_squared_error(test, pred_xgb)),
                 'mape': mape(test, pred_xgb)*100,
                 'pred_test': pred_xgb,
@@ -151,13 +170,11 @@ def process_target(df_f, target_col, freq, horizon):
     full_ts = pd.concat([train, test])
     if freq == 'W-MON':
         start_future = full_ts.index[-1] + pd.DateOffset(weeks=1)
-    elif freq == 'MS':
-        start_future = full_ts.index[-1] + pd.DateOffset(months=1)
     else:
-        start_future = full_ts.index[-1] + pd.Timedelta(days=1)
+        start_future = full_ts.index[-1] + pd.DateOffset(months=1)
     future = pd.date_range(start=start_future, periods=horizon, freq=freq)
 
-    if best_name == 'Holt-Winters':
+    if best_name == 'Хольт-Винтерс':
         full_model = ExponentialSmoothing(full_ts, trend='add', seasonal='add',
                                           seasonal_periods=sp,
                                           initialization_method='estimated').fit()
@@ -166,30 +183,30 @@ def process_target(df_f, target_col, freq, horizon):
         # ML
         X_full = pd.DataFrame(index=full_ts.index)
         for lag in range(1, lags+1):
-            X_full[f'lag_{lag}'] = full_ts.shift(lag)
+            X_full[f'лаг_{lag}'] = full_ts.shift(lag)
         if holiday_series is not None:
-            X_full['holiday'] = pd.Series([is_holiday(d) for d in full_ts.index],
+            X_full['праздник'] = pd.Series([is_holiday(d, custom_holidays) for d in full_ts.index],
                                           index=full_ts.index, dtype=np.int8)
         y_full = full_ts.copy()
         valid = ~X_full.isna().any(axis=1)
         X_full, y_full = X_full.loc[valid], y_full.loc[valid]
-        if best_name == 'Random Forest':
+        if best_name == 'Случайный лес':
             full_model = RandomForestRegressor(n_estimators=50, max_depth=7, random_state=42, n_jobs=-1)
         else:
             full_model = XGBRegressor(n_estimators=80, max_depth=6, learning_rate=0.05,
                                       random_state=42, verbosity=0, n_jobs=-1)
         full_model.fit(X_full, y_full)
         future_hol = None
-        if freq in ('D','W-MON'):
-            future_hol = [1 if is_holiday(d) else 0 for d in future]
+        if freq == 'W-MON':
+            future_hol = [1 if is_holiday(d, custom_holidays) else 0 for d in future]
         hist = y_full.iloc[-lags:].tolist()
         forecast = []
         for i in range(horizon):
             feat = {}
             for j in range(lags):
-                feat[f'lag_{j+1}'] = hist[-j-1] if len(hist) > j else np.nan
+                feat[f'лаг_{j+1}'] = hist[-j-1] if len(hist) > j else np.nan
             if future_hol is not None:
-                feat['holiday'] = future_hol[i]
+                feat['праздник'] = future_hol[i]
             X_row = pd.DataFrame([feat])
             pred = full_model.predict(X_row)[0]
             forecast.append(pred)
@@ -210,9 +227,8 @@ def process_target(df_f, target_col, freq, horizon):
         'pred_test': best['pred_test']
     }
 
-# ---------------------------- Интерфейс ----------------------------
 st.set_page_config(page_title="Интеллектуальная модель прогнозирования продаж", layout="wide")
-st.title("📈 Интеллектуальная модель прогнозирования продаж")
+st.title("Интеллектуальная модель прогнозирования продаж")
 st.markdown("Загрузите CSV-файл с продажами и получите прогноз с автоматическим выбором лучшей модели.")
 
 with st.sidebar:
@@ -220,10 +236,16 @@ with st.sidebar:
             "**Формат даты:** любой\n"
             "**Кодировка:** авто или вручную")
 
-uploaded = st.file_uploader("📂 Загрузите CSV-файл (до 150 МБ)", type="csv")
+    # Подсказка о праздниках и рекомендация по данным
+    st.info("**Учитываемые праздники:** 1-8 января, 23 февраля, 8 марта, 1 и 9 мая, "
+            "12 июня, 4 ноября.\n\n"
+            "**Рекомендация:** для наилучшей точности используйте данные "
+            "минимум за 2 года (104 недели или 24 месяца).")
+
+uploaded = st.file_uploader("Загрузите CSV-файл (до 150 МБ)", type="csv")
 if uploaded:
     if uploaded.size > 150*1024*1024:
-        st.error("❌ Файл > 150 МБ"); st.stop()
+        st.error("Файл > 150 МБ"); st.stop()
 
     raw = uploaded.read()
     try:
@@ -243,11 +265,11 @@ if uploaded:
 
     required = ['date','time','category','product','quantity','price','total']
     if missing := [c for c in required if c not in df.columns]:
-        st.error(f"❌ Отсутствуют столбцы: {', '.join(missing)}"); st.stop()
+        st.error(f"Отсутствуют столбцы: {', '.join(missing)}"); st.stop()
 
     for col in df.select_dtypes(object).columns:
         if df[col].astype(str).str.startswith(('=', '+', '-', '@')).any():
-            st.error("⚠️ Обнаружены ячейки с инъекциями"); st.stop()
+            st.error("Обнаружены ячейки с инъекциями"); st.stop()
 
     df['date'] = df['date'].astype(str).str.strip()
     df['time'] = df['time'].astype(str).str.strip()
@@ -259,8 +281,8 @@ if uploaded:
     if df.empty:
         st.error("Нет данных после очистки"); st.stop()
 
-    st.success(f"✅ {len(df)} записей загружено")
-    with st.expander("🔍 Первые 5 строк"):
+    st.success(f"{len(df)} записей загружено")
+    with st.expander("Первые 5 строк"):
         st.dataframe(df.head(5))
 
     col1, col2, col3 = st.columns(3)
@@ -278,7 +300,20 @@ if uploaded:
         value=5,
         help="При выборе более 12 месяцев (52 недель) точность прогноза может снижаться."
     )
-    show_advanced = st.checkbox("📊 Расширенная аналитика (включая корреляции, важность признаков, ACF)")
+
+    # Пользовательские праздники
+    with st.expander("Дополнительные праздники (необязательно)"):
+        st.caption("Введите даты через запятую в формате ДД.ММ (например: 31.12, 08.03, 09.05)")
+        custom_hol_text = st.text_area(
+            "Свои праздники",
+            placeholder="31.12, 08.03, 09.05",
+            help="Будут учитываться наряду с базовыми праздниками РФ"
+        )
+        custom_holidays = parse_custom_holidays(custom_hol_text)
+        if custom_holidays:
+            st.success(f"Добавлено праздников: {len(custom_holidays)} — {', '.join([f'{d:02d}.{m:02d}' for m,d in sorted(custom_holidays)])}")
+
+    show_advanced = st.checkbox("Расширенная аналитика (сравнение моделей, декомпозиция)")
 
     # Фильтрация
     df_f = df.copy()
@@ -287,34 +322,34 @@ if uploaded:
     if df_f.empty:
         st.warning("Нет данных для выбранной комбинации"); st.stop()
 
-    if st.button("🚀 Построить прогноз"):
+    if st.button("Построить прогноз"):
         start = time.time()
         progress = st.progress(0)
         status = st.empty()
 
         try:
             status.text("Агрегация..."); progress.progress(5)
-            res_total = process_target(df_f, 'total', freq, horizon)
+            res_total = process_target(df_f, 'total', freq, horizon, custom_holidays)
             if res_total is None:
-                st.error("Недостаточно данных для прогноза total"); st.stop()
+                st.error("Недостаточно данных для прогноза суммы продаж"); st.stop()
 
             status.text("Прогноз количества..."); progress.progress(50)
-            res_qty = process_target(df_f, 'quantity', freq, horizon)
+            res_qty = process_target(df_f, 'quantity', freq, horizon, custom_holidays)
 
             progress.progress(90)
             status.text("Формирование результатов...")
 
-            # ---------- Вывод total ----------
-            st.subheader(f"🏆 Результаты прогнозирования (сумма продаж) — модель: {res_total['best_name']}")
+            # ---------- Вывод суммы продаж ----------
+            st.subheader(f"Результаты прогнозирования (сумма продаж) — модель: {res_total['best_name']}")
             col1, col2, col3 = st.columns(3)
-            col1.metric("RMSE", f"{res_total['rmse']:,.2f}")
-            col2.metric("MAPE", f"{res_total['mape']:.2f}%")
+            col1.metric("rmse", f"{res_total['rmse']:,.2f}")
+            col2.metric("mape", f"{res_total['mape']:.2f}%")
             other_total = [m for m in res_total['models'] if m != res_total['best_name']]
             if other_total:
                 best_other = min(other_total, key=lambda x: res_total['models'][x]['mape'])
-                col3.metric(f"Альтернатива: {best_other}", f"MAPE {res_total['models'][best_other]['mape']:.2f}%")
+                col3.metric(f"Альтернатива: {best_other}", f"mape {res_total['models'][best_other]['mape']:.2f}%")
 
-            # График total
+            # График суммы продаж
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=res_total['train'].index, y=res_total['train'].values, name='Обучающие (реальные)', line=dict(color='blue')))
             fig.add_trace(go.Scatter(x=res_total['test'].index, y=res_total['test'].values, name='Тестовые (реальные)', line=dict(color='orange')))
@@ -323,7 +358,7 @@ if uploaded:
             fig.add_trace(go.Scatter(x=np.concatenate([res_total['future'], res_total['future'][::-1]]),
                                      y=np.concatenate([res_total['upper'], res_total['lower'][::-1]]),
                                      fill='toself', fillcolor='rgba(44,160,44,0.2)',
-                                     line=dict(color='rgba(255,255,255,0)'), name='90% CI'))
+                                     line=dict(color='rgba(255,255,255,0)'), name='90% ДИ'))
             split = res_total['test'].index[0]
             fig.add_shape(type='line', x0=split, x1=split, y0=0, y1=1, yref='paper',
                           line=dict(color='red', dash='dash'))
@@ -333,7 +368,7 @@ if uploaded:
             st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
             # Таблица прогнозов
-            st.subheader("📋 Прогнозные значения")
+            st.subheader("Прогнозные значения")
             table_df = pd.DataFrame({
                 'Дата': res_total['future'].strftime('%d-%m-%Y'),
                 'Прогноз суммы': res_total['forecast'].round(2),
@@ -345,18 +380,18 @@ if uploaded:
                 st.caption("Широкий доверительный интервал для суммы объясняется волатильностью данных: чем сильнее колебания продаж, тем больше неопределённость прогноза.")
             st.dataframe(table_df, use_container_width=True)
 
-            # ---------- Расширенная аналитика ----------
+            # ---------- Расширенная аналитика (УРЕЗАННАЯ) ----------
             if show_advanced:
-                st.subheader("📊 Расширенная аналитика (сумма продаж)")
+                st.subheader("Расширенная аналитика (сумма продаж)")
 
                 # 1. Сравнение моделей
                 comp = pd.DataFrame([
-                    {'Модель':n, 'RMSE':d['rmse'], 'MAPE':d['mape']} for n,d in res_total['models'].items()
-                ]).sort_values('MAPE')
+                    {'Модель':n, 'rmse':d['rmse'], 'mape':d['mape']} for n,d in res_total['models'].items()
+                ]).sort_values('mape')
                 st.dataframe(comp, use_container_width=True)
-                fig_c = make_subplots(rows=1, cols=2, subplot_titles=('RMSE','MAPE'))
-                fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['RMSE'], name='RMSE'), 1, 1)
-                fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['MAPE'], name='MAPE'), 1, 2)
+                fig_c = make_subplots(rows=1, cols=2, subplot_titles=('rmse','mape'))
+                fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['rmse'], name='rmse'), 1, 1)
+                fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['mape'], name='mape'), 1, 2)
                 fig_c.update_layout(showlegend=False)
                 st.plotly_chart(fig_c, use_container_width=True)
 
@@ -365,58 +400,19 @@ if uploaded:
                     try:
                         dec = seasonal_decompose(res_total['train'], model='additive', period=res_total['sp'])
                         fd = make_subplots(rows=4, cols=1, subplot_titles=('Наблюдения','Тренд','Сезонность','Остатки'))
-                        fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.observed), 1, 1)
-                        fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.trend), 2, 1)
-                        fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.seasonal), 3, 1)
-                        fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.resid), 4, 1)
+                        fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.observed, name='Наблюдения'), 1, 1)
+                        fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.trend, name='Тренд'), 2, 1)
+                        fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.seasonal, name='Сезонность'), 3, 1)
+                        fd.add_trace(go.Scatter(x=res_total['train'].index, y=dec.resid, name='Остатки'), 4, 1)
                         fd.update_layout(height=800, showlegend=False)
                         st.plotly_chart(fd, use_container_width=True)
-                    except: pass
+                    except Exception as e:
+                        st.warning(f"Не удалось построить декомпозицию: {e}")
 
-                best_res = res_total['models'][res_total['best_name']]
-                resid = res_total['test'].values - best_res['pred_test']
-
-                # 5. Автокорреляция остатков (ACF)
-                if len(resid) > 5:
-                    acf_vals, confint = acf(resid, nlags=min(10, len(resid)//2), alpha=0.05)
-                    fig_acf = go.Figure()
-                    for i, val in enumerate(acf_vals):
-                        fig_acf.add_shape(type='line', x0=i-0.5, x1=i+0.5, y0=val, y1=val, line=dict(color='blue'))
-                    fig_acf.add_hline(y=1.96/np.sqrt(len(resid)), line_dash='dash', line_color='red')
-                    fig_acf.add_hline(y=-1.96/np.sqrt(len(resid)), line_dash='dash', line_color='red')
-                    fig_acf.update_layout(title='Автокорреляция остатков (ACF)',
-                                          xaxis_title='Лаг', yaxis_title='ACF')
-                    st.plotly_chart(fig_acf, use_container_width=True)
-                    st.caption("Значимые пики ACF указывают на оставшуюся структуру в ошибках.")
-
-                # 6. Важность признаков (если лучшая модель ML)
-                if res_total['best_name'] != 'Holt-Winters' and res_total['X_train_for_best'] is not None:
-                    model_obj = best_res['model']
-                    X_best = res_total['X_train_for_best']
-                    if hasattr(model_obj, 'feature_importances_'):
-                        importances = model_obj.feature_importances_
-                        feat_names = X_best.columns
-                        imp_df = pd.DataFrame({'Признак': feat_names, 'Важность': importances}).sort_values('Важность', ascending=True)
-                        fig_imp = go.Figure(go.Bar(x=imp_df['Важность'], y=imp_df['Признак'], orientation='h'))
-                        fig_imp.update_layout(title='Важность признаков в лучшей модели', xaxis_title='Важность', yaxis_title='')
-                        st.plotly_chart(fig_imp, use_container_width=True)
-
-                # 7. Корреляционная матрица лаговых признаков
-                if res_total['X_train_for_best'] is not None:
-                    X_corr = res_total['X_train_for_best'].copy()
-                    y_corr = res_total['train'].loc[X_corr.index]
-                    X_corr['target'] = y_corr
-                    corr = X_corr.corr()
-                    fig_corr = go.Figure(data=go.Heatmap(z=corr.values, x=corr.columns, y=corr.index,
-                                                         colorscale='RdBu_r', zmin=-1, zmax=1))
-                    fig_corr.update_layout(title='Корреляционная матрица признаков и целевой переменной')
-                    st.plotly_chart(fig_corr, use_container_width=True)
-                    st.caption("Матрица показывает взаимосвязи между лагами, временными метками и продажами. Высокие значения (ближе к ±1) – сильная связь.")
-
-            st.caption(f"⏱️ Прогноз построен за {time.time()-start:.1f} сек.")
+            st.caption(f"Прогноз построен за {time.time()-start:.1f} сек.")
 
         except Exception as e:
-            st.error(f"❌ Ошибка: {e}")
+            st.error(f"Ошибка: {e}")
         finally:
             del df_f
             gc.collect()
