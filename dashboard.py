@@ -236,15 +236,15 @@ with st.sidebar:
             "**Кодировка:** авто или вручную")
 
     # Подсказка о праздниках и рекомендация по данным
-    st.info("📅 **Учитываемые праздники:** 1–8 января, 23 февраля, 8 марта, 1 и 9 мая, "
+    st.info("**Учитываемые праздники:** 1–8 января, 23 февраля, 8 марта, 1 и 9 мая, "
             "12 июня, 4 ноября.\n\n"
-            "📊 **Рекомендация:** для наилучшей точности используйте данные "
+            "**Рекомендация:** для наилучшей точности используйте данные "
             "минимум за 2 года (104 недели или 24 месяца).")
 
-uploaded = st.file_uploader("📂 Загрузите CSV-файл (до 150 МБ)", type="csv")
+uploaded = st.file_uploader("Загрузите CSV-файл (до 150 МБ)", type="csv")
 if uploaded:
     if uploaded.size > 150*1024*1024:
-        st.error("❌ Файл > 150 МБ"); st.stop()
+        st.error("Файл > 150 МБ"); st.stop()
 
     raw = uploaded.read()
     try:
@@ -301,7 +301,7 @@ if uploaded:
     )
 
     # Пользовательские праздники
-    with st.expander("🎉 Дополнительные праздники (необязательно)"):
+    with st.expander("Дополнительные праздники (необязательно)"):
         st.caption("Введите даты через запятую в формате ДД.ММ (например: 31.12, 08.03, 09.05)")
         custom_hol_text = st.text_area(
             "Свои праздники",
@@ -312,7 +312,7 @@ if uploaded:
         if custom_holidays:
             st.success(f"Добавлено праздников: {len(custom_holidays)} — {', '.join([f'{d:02d}.{m:02d}' for m,d in sorted(custom_holidays)])}")
 
-    show_advanced = st.checkbox("📊 Расширенная аналитика (включая корреляции, важность признаков, АКФ)")
+    show_advanced = st.checkbox("Расширенная аналитика (включая корреляции, важность признаков, АКФ)")
 
     # Фильтрация
     df_f = df.copy()
@@ -321,7 +321,7 @@ if uploaded:
     if df_f.empty:
         st.warning("Нет данных для выбранной комбинации"); st.stop()
 
-    if st.button("🚀 Построить прогноз"):
+    if st.button("Построить прогноз"):
         start = time.time()
         progress = st.progress(0)
         status = st.empty()
@@ -339,7 +339,7 @@ if uploaded:
             status.text("Формирование результатов...")
 
             # ---------- Вывод суммы продаж ----------
-            st.subheader(f"🏆 Результаты прогнозирования (сумма продаж) — модель: {res_total['best_name']}")
+            st.subheader(f"Результаты прогнозирования (сумма продаж) — модель: {res_total['best_name']}")
             col1, col2, col3 = st.columns(3)
             col1.metric("СКО", f"{res_total['rmse']:,.2f}")
             col2.metric("МАПЕ", f"{res_total['mape']:.2f}%")
@@ -367,7 +367,7 @@ if uploaded:
             st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
             # Таблица прогнозов
-            st.subheader("📋 Прогнозные значения")
+            st.subheader("Прогнозные значения")
             table_df = pd.DataFrame({
                 'Дата': res_total['future'].strftime('%d-%m-%Y'),
                 'Прогноз суммы': res_total['forecast'].round(2),
@@ -381,7 +381,7 @@ if uploaded:
 
             # ---------- Расширенная аналитика ----------
             if show_advanced:
-                st.subheader("📊 Расширенная аналитика (сумма продаж)")
+                st.subheader("Расширенная аналитика (сумма продаж)")
 
                 # 1. Сравнение моделей
                 comp = pd.DataFrame([
@@ -450,7 +450,7 @@ if uploaded:
             st.caption(f"⏱️ Прогноз построен за {time.time()-start:.1f} сек.")
 
         except Exception as e:
-            st.error(f"❌ Ошибка: {e}")
+            st.error(f"Ошибка: {e}")
         finally:
             del df_f
             gc.collect()
