@@ -145,13 +145,13 @@ def process_target(df_f, target_col, freq, horizon, custom_holidays=None):
             'X_train': X_rf
         }
 
-    # XGBoost
+    # Градиентный Бустинг
     if HAS_XGB:
         xgb = XGBRegressor(n_estimators=80, max_depth=6, learning_rate=0.05,
                            random_state=42, verbosity=0, n_jobs=-1)
         pred_xgb, xgb_model, X_xgb = train_ml_model(xgb, train, test.index, lags, freq, holiday_series, custom_holidays)
         if pred_xgb is not None:
-            models['XGBoost'] = {
+            models['Градиентный Бустинг'] = {
                 'rmse': np.sqrt(mean_squared_error(test, pred_xgb)),
                 'mape': mape(test, pred_xgb)*100,
                 'pred_test': pred_xgb,
@@ -341,12 +341,12 @@ if uploaded:
             # ---------- Вывод суммы продаж ----------
             st.subheader(f"Результаты прогнозирования (сумма продаж) — модель: {res_total['best_name']}")
             col1, col2, col3 = st.columns(3)
-            col1.metric("СКО", f"{res_total['rmse']:,.2f}")
-            col2.metric("МАПЕ", f"{res_total['mape']:.2f}%")
+            col1.metric("RMSE", f"{res_total['rmse']:,.2f}")
+            col2.metric("MAPE", f"{res_total['mape']:.2f}%")
             other_total = [m for m in res_total['models'] if m != res_total['best_name']]
             if other_total:
                 best_other = min(other_total, key=lambda x: res_total['models'][x]['mape'])
-                col3.metric(f"Альтернатива: {best_other}", f"МАПЕ {res_total['models'][best_other]['mape']:.2f}%")
+                col3.metric(f"Альтернатива: {best_other}", f"MAPE {res_total['models'][best_other]['mape']:.2f}%")
 
             # График суммы продаж
             fig = go.Figure()
@@ -385,12 +385,12 @@ if uploaded:
 
                 # 1. Сравнение моделей
                 comp = pd.DataFrame([
-                    {'Модель':n, 'СКО':d['rmse'], 'МАПЕ':d['mape']} for n,d in res_total['models'].items()
-                ]).sort_values('МАПЕ')
+                    {'Модель':n, 'RMSE':d['rmse'], 'MAPE':d['mape']} for n,d in res_total['models'].items()
+                ]).sort_values('MAPE')
                 st.dataframe(comp, use_container_width=True)
-                fig_c = make_subplots(rows=1, cols=2, subplot_titles=('СКО','МАПЕ'))
-                fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['СКО'], name='СКО'), 1, 1)
-                fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['МАПЕ'], name='МАПЕ'), 1, 2)
+                fig_c = make_subplots(rows=1, cols=2, subplot_titles=('RMSE','MAPE'))
+                fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['RMSE'], name='RMSE'), 1, 1)
+                fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['MAPE'], name='MAPE'), 1, 2)
                 fig_c.update_layout(showlegend=False)
                 st.plotly_chart(fig_c, use_container_width=True)
 
@@ -423,7 +423,7 @@ if uploaded:
                     st.plotly_chart(fig_acf, use_container_width=True)
                     st.caption("Значимые пики АКФ указывают на оставшуюся структуру в ошибках.")
 
-                # 6. Важность признаков (только для ML-моделей: Случайный лес / XGBoost)
+                # 6. Важность признаков (только для ML-моделей: Случайный лес / Градиентный Бустинг)
                 if res_total['best_name'] != 'Хольт-Винтерс' and res_total['X_train_for_best'] is not None:
                     model_obj = best_res['model']
                     X_best = res_total['X_train_for_best']
