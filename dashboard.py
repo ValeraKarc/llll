@@ -57,7 +57,7 @@ def is_holiday(dt, custom_holidays=None):
         return True
     return False
 
-def mape(y_true, y_pred):
+def MAPE(y_true, y_pred):
     y_true, y_pred = np.array(y_true, dtype=np.float64), np.array(y_pred, dtype=np.float64)
     mask = y_true != 0
     if np.sum(mask) == 0: return np.inf
@@ -126,8 +126,8 @@ def process_target(df_f, target_col, freq, horizon, custom_holidays=None):
                                   initialization_method='estimated').fit()
         pred = hw.forecast(horizon)
         models['Хольт-Винтерс'] = {
-            'rmse': np.sqrt(mean_squared_error(test, pred)),
-            'mape': mape(test, pred)*100,
+            'RMSE': np.sqrt(mean_squared_error(test, pred)),
+            'MAPE': MAPE(test, pred)*100,
             'pred_test': pred,
             'model': hw
         }
@@ -139,8 +139,8 @@ def process_target(df_f, target_col, freq, horizon, custom_holidays=None):
     pred_rf, rf_model, X_rf = train_ml_model(rf, train, test.index, lags, freq, holiday_series, custom_holidays)
     if pred_rf is not None:
         models['Случайный лес'] = {
-            'rmse': np.sqrt(mean_squared_error(test, pred_rf)),
-            'mape': mape(test, pred_rf)*100,
+            'RMSE': np.sqrt(mean_squared_error(test, pred_rf)),
+            'MAPE': MAPE(test, pred_rf)*100,
             'pred_test': pred_rf,
             'model': rf_model,
             'X_train': X_rf
@@ -153,8 +153,8 @@ def process_target(df_f, target_col, freq, horizon, custom_holidays=None):
         pred_xgb, xgb_model, X_xgb = train_ml_model(xgb, train, test.index, lags, freq, holiday_series, custom_holidays)
         if pred_xgb is not None:
             models['Градиентный Бустинг'] = {
-                'rmse': np.sqrt(mean_squared_error(test, pred_xgb)),
-                'mape': mape(test, pred_xgb)*100,
+                'RMSE': np.sqrt(mean_squared_error(test, pred_xgb)),
+                'MAPE': MAPE(test, pred_xgb)*100,
                 'pred_test': pred_xgb,
                 'model': xgb_model,
                 'X_train': X_xgb
@@ -163,7 +163,7 @@ def process_target(df_f, target_col, freq, horizon, custom_holidays=None):
     if not models:
         return None
 
-    best_name = min(models, key=lambda k: models[k]['mape'])
+    best_name = min(models, key=lambda k: models[k]['MAPE'])
     best = models[best_name]
 
     # Финальный прогноз (полный ряд)
@@ -220,7 +220,7 @@ def process_target(df_f, target_col, freq, horizon, custom_holidays=None):
     return {
         'train': train, 'test': test, 'future': future,
         'forecast': forecast, 'lower': lower, 'upper': upper,
-        'rmse': best['rmse'], 'mape': best['mape'],
+        'RMSE': best['RMSE'], 'MAPE': best['MAPE'],
         'best_name': best_name, 'models': models, 'sp': sp,
         'lags': lags, 'freq': freq,
         'X_train_for_best': best.get('X_train', None),
@@ -342,12 +342,12 @@ if uploaded:
             # ---------- Вывод суммы продаж ----------
             st.subheader(f"Результаты прогнозирования (сумма продаж) — модель: {res_total['best_name']}")
             col1, col2, col3 = st.columns(3)
-            col1.metric("rmse", f"{res_total['rmse']:,.2f}")
-            col2.metric("mape", f"{res_total['mape']:.2f}%")
+            col1.metric("RMSE", f"{res_total['RMSE']:,.2f}")
+            col2.metric("MAPE", f"{res_total['MAPE']:.2f}%")
             other_total = [m for m in res_total['models'] if m != res_total['best_name']]
             if other_total:
-                best_other = min(other_total, key=lambda x: res_total['models'][x]['mape'])
-                col3.metric(f"Альтернатива: {best_other}", f"mape {res_total['models'][best_other]['mape']:.2f}%")
+                best_other = min(other_total, key=lambda x: res_total['models'][x]['MAPE'])
+                col3.metric(f"Альтернатива: {best_other}", f"MAPE {res_total['models'][best_other]['MAPE']:.2f}%")
 
             # График суммы продаж
             fig = go.Figure()
@@ -386,12 +386,12 @@ if uploaded:
 
                 # 1. Сравнение моделей
                 comp = pd.DataFrame([
-                    {'Модель':n, 'rmse':d['rmse'], 'mape':d['mape']} for n,d in res_total['models'].items()
-                ]).sort_values('mape')
+                    {'Модель':n, 'RMSE':d['RMSE'], 'MAPE':d['MAPE']} for n,d in res_total['models'].items()
+                ]).sort_values('MAPE')
                 st.dataframe(comp, use_container_width=True)
-                fig_c = make_subplots(rows=1, cols=2, subplot_titles=('rmse','mape'))
-                fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['rmse'], name='rmse'), 1, 1)
-                fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['mape'], name='mape'), 1, 2)
+                fig_c = make_subplots(rows=1, cols=2, subplot_titles=('RMSE','MAPE'))
+                fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['RMSE'], name='RMSE'), 1, 1)
+                fig_c.add_trace(go.Bar(x=comp['Модель'], y=comp['MAPE'], name='MAPE'), 1, 2)
                 fig_c.update_layout(showlegend=False)
                 st.plotly_chart(fig_c, use_container_width=True)
 
