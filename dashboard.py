@@ -371,9 +371,9 @@ if uploaded:
             st.subheader("Прогнозные значения")
             table_df = pd.DataFrame({
                 'Дата': res_total['future'].strftime('%d-%m-%Y'),
-                'Прогноз суммы': res_total['forecast'].round(2),
-                'Нижняя граница (90%)': res_total['lower'].round(2),
-                'Верхняя граница (90%)': res_total['upper'].round(2)
+                'Прогноз суммы, руб': res_total['forecast'].round(2),
+                'Нижняя граница, руб (90%)': res_total['lower'].round(2),
+                'Верхняя граница, руб (90%)': res_total['upper'].round(2)
             })
             if res_qty is not None:
                 table_df['Прогноз количества'] = res_qty['forecast'].round(0).astype(int)
