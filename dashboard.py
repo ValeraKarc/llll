@@ -48,7 +48,6 @@ SEASONAL_PERIODS = {'W-MON': 52, 'MS': 12}
 # ═══════════════════════════════════════════════════════════════
 
 def parse_custom_holidays(text):
-    """Парсит пользовательские праздники из текста формата 'ДД.ММ'."""
     if not text or not text.strip():
         return set()
     holidays = set()
@@ -67,7 +66,6 @@ def parse_custom_holidays(text):
 
 
 def is_holiday(dt, custom_holidays=None):
-    """Проверяет, является ли дата праздником (базовым или пользовательским)."""
     date_key = (dt.month, dt.day)
     if date_key in BASE_HOLIDAYS:
         return True
@@ -77,7 +75,6 @@ def is_holiday(dt, custom_holidays=None):
 
 
 def MAPE(y_true, y_pred):
-    """Средняя абсолютная процентная ошибка (исключает нули)."""
     y_true = np.array(y_true, dtype=np.float64)
     y_pred = np.array(y_pred, dtype=np.float64)
     mask = y_true != 0
@@ -87,10 +84,6 @@ def MAPE(y_true, y_pred):
 
 
 def remove_outliers(series):
-    """
-    Удаляет выбросы методом IQR с временной интерполяцией.
-    ИСПРАВЛЕНО: используется interpolate(method='time') вместо обычной.
-    """
     q1 = series.quantile(0.25)
     q3 = series.quantile(0.75)
     iqr = q3 - q1
@@ -100,21 +93,15 @@ def remove_outliers(series):
     clean = series.copy()
     clean[(clean < lower) | (clean > upper)] = np.nan
     
-    # ИСПРАВЛЕНИЕ: временная интерполяция + заполнение краёв
     clean = clean.interpolate(method='time')
     clean = clean.bfill().ffill()
     return clean
 
 
 def get_seasonal_period(freq, train_len):
-    """
-    ИСПРАВЛЕНО: корректная обработка сезонности.
-    Для месячных данных требуется минимум 24 точки (2 года).
-    """
     sp = SEASONAL_PERIODS.get(freq, 12)
     
     if freq == 'MS' and train_len < 24:
-        # Недостаточно данных для годовой сезонности — отключаем
         return None
     
     if sp >= train_len:
@@ -129,10 +116,6 @@ def get_seasonal_period(freq, train_len):
 
 def train_ml_model(model, train_series, test_index, lags, freq, 
                    holiday_series=None, custom_holidays=None):
-    """
-    Обучает ML-модель с лаговыми признаками.
-    ИСПРАВЛЕНО: корректная обработка граничных случаев.
-    """
     X = pd.DataFrame(index=train_series.index)
     for lag in range(1, lags + 1):
         X[f'лаг_{lag}'] = train_series.shift(lag)
@@ -170,14 +153,9 @@ def train_ml_model(model, train_series, test_index, lags, freq,
 
 
 def fit_holt_winters(train, sp, freq):
-    """
-    ИСПРАВЛЕНО: автоопределение типа тренда и сезонности.
-    Пробует аддитивный и мультипликативный варианты, выбирает по AIC.
-    """
     configs = []
     
     if sp is not None and len(train) >= 2 * sp + 2:
-        # Есть достаточно данных для сезонной модели
         configs = [
             {'trend': 'add', 'seasonal': 'add'},
             {'trend': 'add', 'seasonal': 'mul'},
@@ -185,7 +163,6 @@ def fit_holt_winters(train, sp, freq):
             {'trend': 'mul', 'seasonal': 'mul'},
         ]
     else:
-        # Нет сезонности — только тренд
         configs = [
             {'trend': 'add', 'seasonal': None},
             {'trend': 'mul', 'seasonal': None},
@@ -215,10 +192,6 @@ def fit_holt_winters(train, sp, freq):
 
 
 def process_target(df_f, target_col, freq, horizon, custom_holidays=None):
-    """
-    Основная функция прогнозирования.
-    ИСПРАВЛЕНО: корректная обработка сезонности и всех граничных случаев.
-    """
     # Агрегация
     ts = df_f.set_index('datetime')[target_col].astype(np.float64)
     ts = ts.resample(freq).sum()
@@ -236,7 +209,7 @@ def process_target(df_f, target_col, freq, horizon, custom_holidays=None):
     # Лаги
     lags = 24 if freq == 'W-MON' else min(6, len(train) // 2)
     
-    # Праздники (только для недель)
+    # Праздники 
     holiday_series = None
     if freq == 'W-MON':
         holiday_series = pd.Series(
@@ -246,7 +219,7 @@ def process_target(df_f, target_col, freq, horizon, custom_holidays=None):
     
     models = {}
     
-    # ── Хольт-Винтерс ──
+    # Хольт-Винтерс
     try:
         hw_model = fit_holt_winters(train, sp, freq)
         if hw_model is not None:
@@ -260,7 +233,7 @@ def process_target(df_f, target_col, freq, horizon, custom_holidays=None):
     except Exception as e:
         st.warning(f"Хольт-Винтерс ({target_col}): {e}")
     
-    # ── Случайный лес ──
+    # Случайный лес
     rf = RandomForestRegressor(
         n_estimators=50, max_depth=7, 
         random_state=42, n_jobs=-1
@@ -278,7 +251,7 @@ def process_target(df_f, target_col, freq, horizon, custom_holidays=None):
             'X_train': X_rf
         }
     
-    # ── Градиентный Бустинг ──
+    # Градиентный Бустинг
     if HAS_XGB:
         xgb = XGBRegressor(
             n_estimators=80, max_depth=6, learning_rate=0.05,
@@ -434,15 +407,11 @@ if uploaded:
         enc = 'utf-8'
     
     uploaded.seek(0)
-    
-    # ИСПРАВЛЕНИЕ: читаем сначала без usecols, нормализуем названия
     try:
         df = pd.read_csv(uploaded, encoding=enc)
     except Exception as e:
         st.error(f"Ошибка чтения: {e}")
         st.stop()
-    
-    # ИСПРАВЛЕНИЕ: нормализация названий столбцов
     df.columns = df.columns.str.strip().str.lower()
     
     required = ['date', 'time', 'category', 'product', 'quantity', 'price', 'total']
@@ -484,7 +453,7 @@ if uploaded:
     with st.expander("Первые 5 строк"):
         st.dataframe(df.head(5))
     
-    # ── Панель управления ──
+    # Панель управления
     col1, col2, col3 = st.columns(3)
     
     freq_label = col1.selectbox(
