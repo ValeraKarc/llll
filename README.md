@@ -19,7 +19,7 @@
 4. Выбор победителя по MAPE и отрисовка прогноза на графике
 
 ## Архитектура решения
-![Архитектура](https://drive.google.com/file/d/11N4lnG968WrjfnYDtslwe7mA2prO8XoG/view?usp=sharing)
+![Архитектура](https://disk.yandex.ru/i/LUV_WK-F3B__dQ)
 
 ## Результаты тестирования
 На тестовых данных система показала:
